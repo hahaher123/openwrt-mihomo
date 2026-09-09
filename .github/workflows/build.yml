@@ -1,0 +1,150 @@
+name: Build Mihomo.apk
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64_generic, x86_64]
+
+    steps:
+      - name: Checkout source tree
+        uses: actions/checkout@v6
+
+      - name: Get latest mihomo version
+        run: |
+          TAG=$(curl -s "https://api.github.com/repos/MetaCubeX/mihomo/tags" | jq -r '.[0].name' | tr -d 'v')
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Check if build already exists for this arch
+        id: check_existing
+        run: |
+          if gh release view "v${{ env.TAG }}" --json assets --jq '.assets[].name' 2>/dev/null | grep -q "${{ matrix.arch }}"; then
+            echo "SKIP_BUILD=true" >> $GITHUB_ENV
+            echo "Skipping build - release v${{ env.TAG }} already contains APK for ${{ matrix.arch }}"
+          else
+            echo "SKIP_BUILD=false" >> $GITHUB_ENV
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install deps
+        if: env.SKIP_BUILD != 'true'
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget jq
+
+      - name: Generate build keys
+        if: env.SKIP_BUILD != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y signify-openbsd
+          signify-openbsd -G -n -c 'DO NOT USE - OpenWrt packages feed CI' -p packages_ci.pub -s packages_ci.sec
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "KEY_BUILD<<$EOF" >> $GITHUB_ENV
+          cat packages_ci.sec >> $GITHUB_ENV
+          echo "$EOF" >> $GITHUB_ENV
+
+      - name: Setup latest golang release
+        if: env.SKIP_BUILD != 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+
+      - name: Show go version
+        if: env.SKIP_BUILD != 'true'
+        run: |
+          go version
+
+      - name: Build
+        if: env.SKIP_BUILD != 'true'
+        run: |
+          case "${{ matrix.arch }}" in
+            aarch64_generic)
+              TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/rockchip/armv8/"
+              ;;
+            x86_64)
+              TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/"
+              ;;
+          esac
+
+          SDK=$(curl -s -L "${TARGET_URL}sha256sums" | grep sdk | sed 's/.* \*//')
+          wget "${TARGET_URL}${SDK}" -O sdk.tar.xz
+
+          mkdir sdk
+          tar -I zstd -xf sdk.tar.xz --strip-components=1 -C sdk
+          cd sdk
+          ./scripts/feeds update -a
+          wget "${TARGET_URL}config.buildinfo" -O .config
+          make defconfig
+          cp -a ../mihomo package/
+          sed -i 's/PKG_VERSION:=stable/PKG_VERSION:=${{ env.TAG }}/g' package/mihomo/Makefile
+          cat package/mihomo/Makefile
+          make package/mihomo/{download,check} FIXUP=1 V=s
+          cat package/mihomo/Makefile
+          make package/mihomo/compile V=s
+
+          find bin/packages -name '*.apk' -exec sh -c 'mv "$1" "${1%.apk}_${{ matrix.arch }}.apk"' _ {} \;
+          FN=$(find bin/packages -name '*.apk' | sort | head -1 | xargs basename)
+          echo "PKG_NAME=$FN" >> $GITHUB_ENV
+          cd -
+
+      - name: Publishing to GitHub Artifacts
+        if: env.SKIP_BUILD != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PKG_NAME }}
+          path: |
+            sdk/bin/packages/*/*/mihomo*.apk
+
+      - name: Read release.md and use it as a body of new release
+        if: env.SKIP_BUILD != 'true'
+        id: read_release
+        shell: bash
+        run: |
+          r=$(cat README.md)
+          r="${r//'%'/'%25'}"
+          r="${r//$'\n'/'%0A'}"
+          r="${r//$'\r'/'%0D'}"
+          echo "RELEASE_BODY=$r" >> $GITHUB_OUTPUT
+
+      - name: Publishing to GitHub Releases
+        if: env.SKIP_BUILD != 'true'
+        continue-on-error: true
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: sdk/bin/packages/*/*/mihomo*.apk
+          tag: v${{ env.TAG }}
+          release_name: v${{ env.TAG }}
+          file_glob: true
+          overwrite: true
+          body: |
+            ${{ steps.read_release.outputs.RELEASE_BODY }}
+
+  cleanup:
+    name: Keep only 2 latest releases
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Delete old releases
+        run: |
+          gh release list --limit 100 --json tagName | jq -r '.[2:][].tagName' | xargs -r -I % gh release delete % --yes --cleanup-tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

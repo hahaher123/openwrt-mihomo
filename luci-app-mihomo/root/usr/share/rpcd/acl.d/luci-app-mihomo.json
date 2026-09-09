@@ -1,0 +1,21 @@
+{
+	"luci-app-mihomo": {
+		"description": "Grant access to LuCI app mihomo",
+		"read": {
+			"ubus": {
+				"service": [ "list" ]
+			},
+			"file": {
+				"/usr/bin/mihomo": [ "exec" ],
+				"/sbin/logread": [ "exec" ]
+			},
+			"uci": [ "mihomo" ]
+		},
+		"write": {
+			"file": {
+				"/etc/init.d/mihomo": [ "exec" ]
+			},
+			"uci": [ "mihomo" ]
+		}
+	}
+}
