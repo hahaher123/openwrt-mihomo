@@ -91,7 +91,7 @@ jobs:
           wget "${TARGET_URL}config.buildinfo" -O .config
           make defconfig
           cp -a ../mihomo package/
-          sed -i 's/PKG_VERSION:=stable/PKG_VERSION:=${{ env.TAG }}/g' package/mihomo/Makefile
+          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=${{ env.TAG }}/g' package/mihomo/Makefile
           cat package/mihomo/Makefile
           make package/mihomo/{download,check} FIXUP=1 V=s
           cat package/mihomo/Makefile
