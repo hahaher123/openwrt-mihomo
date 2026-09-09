@@ -31,6 +31,13 @@ openwrt-mihomo/
 - 运行用户（`user`，TUN 模式请保持 root）
 - 监听接口列表（`ifaces`，网络变动时自动重启服务）
 - 标准输出 / 错误输出写入系统日志开关（`log_stdout` / `log_stderr`）
+- 后台管理地址（`dashboard`，供「后台管理」页内嵌使用）
+
+**「后台管理」页**
+- 内嵌 mihomo 外部控制器的 Web 管理界面（metacubexd / yacd 等），可视化管理代理节点、规则与连接
+- 地址默认 `http://<路由器地址>:9090/ui`，可在「运行参数」页修改
+- 提供「在新窗口打开」与「重新加载」按钮
+- 使用前需在 mihomo 配置文件中启用 `external-controller`（如 `0.0.0.0:9090`）与 `external-ui`（如 `ui`），并将仪表盘文件放入对应目录
 
 修改参数后点击「保存并应用」会自动重启服务使其生效（由 init.d 的 `reload_service` 配合完成）。
 

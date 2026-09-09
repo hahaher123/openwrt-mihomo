@@ -41,6 +41,10 @@ return view.extend({
 		o = s.option(form.Flag, 'log_stderr', _('错误输出写入系统日志'));
 		o.default = o.enabled;
 
+		o = s.option(form.Value, 'dashboard', _('后台管理地址'),
+			_('mihomo 外部控制器 Web 界面地址 (metacubexd / yacd 等), 留空则默认 http://<路由器地址>:9090/ui。需在 mihomo 配置文件中启用 external-controller 与 external-ui。'));
+		o.placeholder = 'http://192.168.1.1:9090/ui';
+
 		return m.render();
 	}
 });
