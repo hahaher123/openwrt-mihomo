@@ -23,7 +23,7 @@ return view.extend({
 
 		o = s.option(form.Value, 'workdir', _('工作目录'),
 			_('Mihomo 运行数据目录 (缓存、GeoIP 数据等), 需为绝对路径。'));
-		o.placeholder = '/usr/share/mihomo';
+		o.placeholder = '/etc/mihomo';
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'user', _('运行用户'),

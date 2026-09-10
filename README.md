@@ -27,7 +27,7 @@ openwrt-mihomo/
 **「运行参数」页**（对应 `/etc/config/mihomo`）
 - 开机自启开关（`enabled`）
 - 配置文件路径（`conffile`，默认 `/etc/mihomo/config.yaml`）
-- 工作目录（`workdir`，默认 `/usr/share/mihomo`）
+- 工作目录（`workdir`，默认 `/etc/mihomo`）
 - 运行用户（`user`，TUN 模式请保持 root）
 - 监听接口列表（`ifaces`，网络变动时自动重启服务）
 - 标准输出 / 错误输出写入系统日志开关（`log_stdout` / `log_stderr`）
