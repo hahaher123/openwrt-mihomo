@@ -69,73 +69,111 @@ return view.extend({
 		var enabled = !!data[1];
 		var version = data[2];
 
-		var statusBadge = E('span', { 'class': 'label' }, E('em', [ _('加载中…') ]));
-		var pidEl = E('span', {}, [ '-' ]);
-		var enabledEl = E('span', {}, [ '-' ]);
+		/* -- 大号状态横幅 -- */
+		var bannerIcon = E('span', {
+			'style': 'display:inline-block; width:16px; height:16px; border-radius:50%; background:#fff; margin-right:14px; vertical-align:middle; box-shadow:0 0 0 4px rgba(255,255,255,0.35);'
+		});
 
-		var updateStatus = function(s) {
-			statusBadge.className = 'label ' + (s.running ? 'label-success' : 'label-important');
-			statusBadge.textContent = s.running ? _('运行中') : _('未运行');
-			pidEl.textContent = (s.running && s.pid) ? String(s.pid) : '-';
-		};
+		var bannerText = E('span', {
+			'style': 'font-size:1.9em; font-weight:700; vertical-align:middle;'
+		}, [ '…' ]);
 
-		updateStatus(status);
-		enabledEl.textContent = enabled ? _('已启用') : _('未启用 (请在运行参数页开启)');
+		var bannerSub = E('div', {
+			'style': 'font-size:1.05em; opacity:0.9; margin-top:4px; text-align:right;'
+		}, [ '' ]);
 
-		var table = E('table', { 'class': 'table' }, [
-			E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left', 'width': '33%' }, [ _('运行状态') ]),
-				E('td', { 'class': 'td left' }, [ statusBadge ])
-			]),
-			E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left' }, [ _('进程 PID') ]),
-				E('td', { 'class': 'td left' }, [ pidEl ])
-			]),
-			E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left' }, [ _('开机自启') ]),
-				E('td', { 'class': 'td left' }, [ enabledEl ])
-			]),
-			E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left' }, [ _('程序版本') ]),
-				E('td', { 'class': 'td left' }, [ version || _('未知') ])
-			])
+		var banner = E('div', {
+			'style': 'display:flex; align-items:center; justify-content:space-between; padding:20px 26px; border-radius:10px; margin:6px 0 14px 0; color:#fff; background:#9e9e9e; box-shadow:0 2px 6px rgba(0,0,0,0.18);'
+		}, [
+			E('div', {}, [ bannerIcon, bannerText ]),
+			bannerSub
 		]);
 
+		var updateBanner = function(s) {
+			if (s.running) {
+				banner.style.background = '#2e9e44';
+				bannerText.textContent = _('运行中');
+				bannerSub.textContent = s.pid ? 'PID: %s'.format(String(s.pid)) : '';
+			} else {
+				banner.style.background = '#d64541';
+				bannerText.textContent = _('未运行');
+				bannerSub.textContent = _('服务未在运行, 点击下方「启动」');
+			}
+		};
+
+		updateBanner(status);
+
+		/* -- 信息磁贴 -- */
+		var tile = function(title) {
+			return E('div', {
+				'style': 'flex:1; background:#fff; border:1px solid #e2e2e2; border-radius:8px; padding:12px 18px; min-width:140px;'
+			}, [
+				E('div', { 'style': 'font-size:0.85em; color:#888; margin-bottom:4px;' }, [ title ]),
+				E('div', { 'class': 'tile-value', 'style': 'font-size:1.25em; font-weight:600; color:#333;' }, [ '-' ])
+			]);
+		};
+
+		var tileEnabled = tile(_('开机自启'));
+		var tileVersion = tile(_('程序版本'));
+
+		var setTile = function(t, v, color) {
+			var el = t.querySelector('.tile-value');
+			el.textContent = v;
+
+			if (color)
+				el.style.color = color;
+			else
+				el.style.color = '#333';
+		};
+
+		setTile(tileEnabled, enabled ? _('已启用') : _('未启用'), enabled ? '#2e9e44' : '#b06000');
+		setTile(tileVersion, version || _('未知'));
+
+		var tiles = E('div', {
+			'style': 'display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;'
+		}, [ tileEnabled, tileVersion ]);
+
+		/* -- 控制按钮 -- */
 		var button = function(action, label, cls) {
 			return E('button', {
 				'class': 'btn cbi-button ' + (cls || 'cbi-button-apply'),
+				'style': 'font-size:1.1em; padding:8px 22px;',
 				'click': ui.createHandlerFn(self, 'handleServiceAction', action)
 			}, [ label ]);
 		};
 
-		var buttons = E('div', { 'style': 'margin:1em 0' }, [
-			button('start', _('启动')),
+		var buttons = E('div', { 'style': 'margin:4px 0 16px 0' }, [
+			button('start', _('▶ 启动')),
 			' ',
-			button('stop', _('停止'), 'cbi-button-remove'),
+			button('stop', _('■ 停止'), 'cbi-button-remove'),
 			' ',
-			button('restart', _('重启'))
+			button('restart', _('↻ 重启'))
 		]);
 
+		/* -- 日志 -- */
 		var logPre = E('pre', {
-			'style': 'max-height:400px; overflow:auto; padding:8px; white-space:pre-wrap; word-break:break-all;'
+			'style': 'max-height:400px; overflow:auto; padding:10px; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:8px; font-size:0.9em;'
 		}, [ _('加载中…') ]);
 
 		poll.add(function() {
 			return getServiceStatus().then(function(s) {
-				updateStatus(s);
+				updateBanner(s);
 
-				return getLog().then(function(log) {
-					logPre.textContent = log || _('暂无日志 (需在运行参数中开启日志输出)');
+				return isEnabled().then(function(en) {
+					setTile(tileEnabled, en ? _('已启用') : _('未启用'), en ? '#2e9e44' : '#b06000');
+
+					return getLog().then(function(log) {
+						logPre.textContent = log || _('暂无日志 (需在运行参数中开启日志输出)');
+					});
 				});
 			});
 		}, 5);
 
 		return E([
 			E('h2', [ _('Mihomo 运行状态') ]),
-			E('div', { 'class': 'cbi-map-descr' }, [
-				_('查看 Mihomo 服务的运行状态并进行启动/停止/重启控制。开机自启请在「运行参数」页修改。')
-			]),
-			E('div', { 'class': 'cbi-section' }, [ table, buttons ]),
+			banner,
+			tiles,
+			buttons,
 			E('h3', [ _('系统日志 (最近 50 行)') ]),
 			logPre
 		]);
