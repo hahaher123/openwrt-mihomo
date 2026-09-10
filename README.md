@@ -13,6 +13,7 @@ openwrt-mihomo/
 ```
 
 - **mihomo 包**：面向 OpenWrt 25 的原生 mihomo 构建（APK 包格式），自带 procd init 脚本与 uci 配置
+- **内置地理数据库**：打包时自动下载 [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip) 的 `Country.mmdb` 与 [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat) 的 `geoip.dat`、`geosite.dat`（经 jsdelivr CDN），安装时释放至 `/etc/mihomo`，无需 mihomo 首次运行时在线下载
 - **luci-app-mihomo**：在 Makefile 中通过 `LUCI_DEPENDS:=+luci-base +mihomo` 声明对 mihomo 的硬依赖，单独编译 LuCI 界面即可自动编译 mihomo
 
 ## LuCI 界面功能

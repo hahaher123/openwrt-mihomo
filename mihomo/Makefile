@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mihomo
 PKG_VERSION:=1.19.30
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/MetaCubeX/mihomo/tar.gz/v$(PKG_VERSION)?
@@ -29,6 +29,34 @@ GO_PKG_TAGS:=with_gvisor
 
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
+
+# Bundled geo databases (released to /etc/mihomo on install).
+# HASH:=skip on purpose: these branch files are updated upstream over time,
+# a pinned hash would break future builds. Verified against the jsdelivr CDN.
+define Download/country-mmdb
+  FILE:=Country.mmdb
+  URL:=https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release
+  URL_FILE:=Country.mmdb
+  HASH:=skip
+endef
+
+define Download/geoip-dat
+  FILE:=geoip.dat
+  URL:=https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release
+  URL_FILE:=geoip.dat
+  HASH:=skip
+endef
+
+define Download/geosite-dat
+  FILE:=geosite.dat
+  URL:=https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release
+  URL_FILE:=geosite.dat
+  HASH:=skip
+endef
+
+$(eval $(call Download,country-mmdb))
+$(eval $(call Download,geoip-dat))
+$(eval $(call Download,geosite-dat))
 
 define Package/mihomo
   SECTION:=net
@@ -62,6 +90,10 @@ define Package/mihomo/install
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/docs/config.yaml $(1)/etc/mihomo/example.yaml
 	$(INSTALL_BIN) $(CURDIR)/files/tproxy.sh $(1)/etc/mihomo/tproxy.sh
 	$(INSTALL_DATA) $(CURDIR)/files/clash.nft $(1)/etc/mihomo/clash.nft
+
+	$(INSTALL_DATA) $(DL_DIR)/Country.mmdb $(1)/etc/mihomo/Country.mmdb
+	$(INSTALL_DATA) $(DL_DIR)/geoip.dat $(1)/etc/mihomo/geoip.dat
+	$(INSTALL_DATA) $(DL_DIR)/geosite.dat $(1)/etc/mihomo/geosite.dat
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/mihomo.config $(1)/etc/config/mihomo
