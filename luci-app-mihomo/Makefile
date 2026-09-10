@@ -8,7 +8,7 @@ PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Leo Douglas <douglarek@gmail.com>
 
 PKG_VERSION:=1.0.1
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 LUCI_TITLE:=LuCI support for Mihomo
 # "+mihomo" is a hard dependency: building/installing luci-app-mihomo

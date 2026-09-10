@@ -59,6 +59,22 @@ return view.extend({
 		});
 	},
 
+	handleToggleEnabled: function(ev) {
+		var next = (uci.get('mihomo', 'main', 'enabled') == '1') ? '0' : '1';
+
+		uci.set('mihomo', 'main', 'enabled', next);
+
+		return uci.save().then(function() {
+			return uci.apply();
+		}).then(function() {
+			ui.addNotification(null, E('p', next == '1'
+				? _('已开启开机自启, 服务将自动启动')
+				: _('已关闭开机自启, 正在运行的服务将自动停止')), 'info');
+		}).catch(function(e) {
+			ui.addNotification(null, E('p', _('修改开机自启失败: %s').format(String(e.message || e))), 'error');
+		});
+	},
+
 	load: function() {
 		return Promise.all([ getServiceStatus(), isEnabled(), getVersion() ]);
 	},
@@ -126,8 +142,21 @@ return view.extend({
 				el.style.color = '#333';
 		};
 
-		setTile(tileEnabled, enabled ? _('已启用') : _('未启用'), enabled ? '#2e9e44' : '#b06000');
+		var toggleBtn = E('button', {
+			'class': 'btn cbi-button cbi-button-positive',
+			'style': 'margin-top:8px; font-size:0.95em; padding:3px 14px;',
+			'click': ui.createHandlerFn(self, 'handleToggleEnabled')
+		}, [ '' ]);
+
+		var updateEnabled = function(en) {
+			setTile(tileEnabled, en ? _('已启用') : _('未启用'), en ? '#2e9e44' : '#b06000');
+			toggleBtn.className = 'btn cbi-button ' + (en ? 'cbi-button-negative' : 'cbi-button-positive');
+			toggleBtn.textContent = en ? _('关闭自启') : _('开启自启');
+		};
+
+		updateEnabled(enabled);
 		setTile(tileVersion, version || _('未知'));
+		tileEnabled.appendChild(toggleBtn);
 
 		var tiles = E('div', {
 			'style': 'display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;'
@@ -160,7 +189,7 @@ return view.extend({
 				updateBanner(s);
 
 				return isEnabled().then(function(en) {
-					setTile(tileEnabled, en ? _('已启用') : _('未启用'), en ? '#2e9e44' : '#b06000');
+					updateEnabled(en);
 
 					return getLog().then(function(log) {
 						logPre.textContent = log || _('暂无日志 (需在运行参数中开启日志输出)');
