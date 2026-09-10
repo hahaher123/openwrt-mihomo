@@ -1,0 +1,54 @@
+# mihomo TPROXY nft rules (standalone table "inet clash")
+# Managed by /etc/init.d/mihomo: applied on start (when transparent=1),
+# removed on stop. This is an editable file: changes take effect on the
+# next mihomo restart.
+# Requires mihomo config.yaml: tproxy-port: 7894
+# Note: do NOT keep the old fw4 include /etc/nftables.d/11-clash.nft at
+# the same time, otherwise the rules will be duplicated.
+
+table inet clash {
+
+	set proxy_ip {
+		type ipv4_addr
+		flags interval
+		elements = { 198.18.0.0/16,
+		             149.154.160.0/20,
+		             91.108.0.0/16,
+		             109.239.140.0/24,
+		             91.105.192.0/23,
+		             185.76.151.0/24,
+		             95.161.64.0/20 }
+	}
+
+	set private {
+		type ipv4_addr
+		flags interval
+		elements = { 0.0.0.0/8,
+		             10.0.0.0/8,
+		             100.64.0.0/10,
+		             127.0.0.0/8,
+		             169.254.0.0/16,
+		             172.16.0.0/12,
+		             192.168.0.0/16,
+		             224.0.0.0/4,
+		             240.0.0.0/4 }
+	}
+
+	chain clashproxy {
+		ip daddr @private return
+		ip protocol tcp tproxy ip to :7894 meta mark set 0x100 counter accept comment "proxy-tcp"
+		ip protocol udp tproxy ip to :7894 meta mark set 0x100 counter accept comment "proxy-udp"
+	}
+
+	chain filter_proxyip {
+		type filter hook prerouting priority filter; policy accept;
+		ip daddr @proxy_ip ip protocol { tcp, udp } jump clashproxy
+		return
+	}
+
+	chain filter_output {
+		type route hook output priority 0; policy accept;
+		ip daddr @proxy_ip ip protocol { tcp, udp } meta mark set 0x100 counter accept comment "reroute"
+		return
+	}
+}

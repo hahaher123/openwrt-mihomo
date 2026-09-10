@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mihomo
 PKG_VERSION:=1.19.30
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/MetaCubeX/mihomo/tar.gz/v$(PKG_VERSION)?
@@ -60,6 +60,8 @@ define Package/mihomo/install
 
 	$(INSTALL_DIR) $(1)/etc/mihomo/
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/docs/config.yaml $(1)/etc/mihomo/example.yaml
+	$(INSTALL_BIN) $(CURDIR)/files/tproxy.sh $(1)/etc/mihomo/tproxy.sh
+	$(INSTALL_DATA) $(CURDIR)/files/clash.nft $(1)/etc/mihomo/clash.nft
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/mihomo.config $(1)/etc/config/mihomo

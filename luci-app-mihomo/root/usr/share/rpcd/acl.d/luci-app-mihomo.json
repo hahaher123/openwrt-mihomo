@@ -7,13 +7,18 @@
 			},
 			"file": {
 				"/usr/bin/mihomo": [ "exec" ],
-				"/sbin/logread": [ "exec" ]
+				"/sbin/logread": [ "exec" ],
+				"/etc/init.d/mihomo": [ "exec" ],
+				"/etc/mihomo/tproxy.sh": [ "read" ],
+				"/etc/mihomo/clash.nft": [ "read" ]
 			},
 			"uci": [ "mihomo" ]
 		},
 		"write": {
 			"file": {
-				"/etc/init.d/mihomo": [ "exec" ]
+				"/etc/init.d/mihomo": [ "exec" ],
+				"/etc/mihomo/tproxy.sh": [ "write" ],
+				"/etc/mihomo/clash.nft": [ "write" ]
 			},
 			"uci": [ "mihomo" ]
 		}

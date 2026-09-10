@@ -39,6 +39,12 @@ openwrt-mihomo/
 - 提供「在新窗口打开」与「重新加载」按钮
 - 使用前需在 mihomo 配置文件中启用 `external-controller`（如 `0.0.0.0:9090`）与 `external-ui`（如 `ui`），并将仪表盘文件放入对应目录
 
+**「透明代理」页**
+- 开关控制 uci `transparent` 选项：开启后 mihomo **启动前**自动添加 fwmark 策略路由（执行 `/etc/mihomo/tproxy.sh start`：fwmark 0x100 → 表 256）并加载 nft 规则（`nft -f /etc/mihomo/clash.nft`，独立表 `inet clash`）；**服务停止时自动移除**全部规则
+- 在线编辑 `/etc/mihomo/tproxy.sh`（策略路由脚本，start/stop 双模式）与 `/etc/mihomo/clash.nft`（TPROXY 规则，tproxy 端口 7894、代理网段集合 `proxy_ip`），保存后重启服务生效
+- 「检查规则状态」按钮：调用 init.d 的 `tproxystatus` 命令，显示当前 `ip rule`、路由表 256 与 nft 表内容，一目了然确认规则是否生效
+- 要求 mihomo 配置文件设置 `tproxy-port: 7894`；**不要**同时保留旧版 fw4 include 文件 `/etc/nftables.d/11-clash.nft`，否则规则重复
+
 修改参数后点击「保存并应用」会自动重启服务使其生效（由 init.d 的 `reload_service` 配合完成）。
 
 ## 前置要求

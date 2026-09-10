@@ -31,10 +31,19 @@
 
 	"admin/services/mihomo/dashboard": {
 		"title": "后台管理",
-		"order": 3,
+		"order": 4,
 		"action": {
 			"type": "view",
 			"path": "mihomo/dashboard"
+		}
+	},
+
+	"admin/services/mihomo/tproxy": {
+		"title": "透明代理",
+		"order": 3,
+		"action": {
+			"type": "view",
+			"path": "mihomo/tproxy"
 		}
 	}
 }
