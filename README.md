@@ -50,7 +50,7 @@ openwrt-mihomo/
 **透明代理排查要点**
 - 规则未生效先看系统日志有无 `failed to load /etc/mihomo/clash.nft`——nft 加载是**整体原子操作，任意一行报错则整个文件都不生效**（此时不会加到任何规则，看起来就是"启用了但没捕获到流量"）
 - `nft list table inet clash` 查看每条规则的 `packets/bytes` 计数：为 0 说明流量未匹配，检查 `proxy_ip` 网段是否覆盖目标地址、以及客户端流量是否真的经路由器转发
-- 编辑规则时注意：`redirect` / `accept` / `return` 等属于**终止语句**，必须写在一条规则的最后，其后不能再接 `counter`、`comment`；否则报 `Statement after terminal statement has no effect`（正确写法：`... counter comment "xxx" redirect to :7893`）
+- 编辑规则时注意语句顺序：`redirect` / `accept` / `drop` 等属于**终止语句**，必须放在规则的**最后**，其后不能再有 `counter` 等语句，否则报 `Statement after terminal statement has no effect`；而 `comment "..."` 是唯一例外（nft 手册：comment 始终被求值），但它**受限语法约束必须写在规则最末尾**。因此正确写法是 `... counter redirect to :7893 comment "proxy-tcp-redirect"`（counter 在前、redirect 居中、comment 收尾），写成 `... counter comment "xxx" redirect ...` 会报 `syntax error, unexpected redirect`
 
 修改参数后点击「保存并应用」会自动重启服务使其生效（由 init.d 的 `reload_service` 配合完成）。
 
