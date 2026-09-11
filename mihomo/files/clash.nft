@@ -1,8 +1,14 @@
-# mihomo TPROXY nft rules (standalone table "inet clash")
+# mihomo transparent proxy nft rules (standalone table "inet clash")
 # Managed by /etc/init.d/mihomo: applied on start (when transparent=1),
 # removed on stop. This is an editable file: changes take effect on the
 # next mihomo restart.
-# Requires mihomo config.yaml: tproxy-port: 7894
+# Mixed mode: TCP goes REDIRECT (redir-port 7893), UDP goes TPROXY
+# (tproxy-port 7894). REDIRECT is a NAT statement and must live in a
+# nat-type chain; TPROXY only works in a filter-type prerouting chain,
+# hence the two separate chains below.
+# Requires mihomo config.yaml:
+#   redir-port: 7893
+#   tproxy-port: 7894
 # Note: do NOT keep the old fw4 include /etc/nftables.d/11-clash.nft at
 # the same time, otherwise the rules will be duplicated.
 
@@ -34,21 +40,38 @@ table inet clash {
 		             240.0.0.0/4 }
 	}
 
-	chain clashproxy {
-		ip daddr @private return
-		ip protocol tcp tproxy ip to :7894 meta mark set 0x100 counter accept comment "proxy-tcp"
-		ip protocol udp tproxy ip to :7894 meta mark set 0x100 counter accept comment "proxy-udp"
+	# Forwarded TCP: REDIRECT (nat chain only; no fwmark/policy route needed,
+	# original destination recovered by mihomo via SO_ORIGINAL_DST)
+	chain nat_prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		ip daddr @proxy_ip ip protocol tcp redirect to :7893 counter comment "proxy-tcp-redirect"
 	}
 
-	chain filter_proxyip {
+	# Forwarded UDP: TPROXY (filter chain only; needs the fwmark policy
+	# route from tproxy.sh)
+	chain clashproxy_udp {
+		ip daddr @private return
+		ip protocol udp tproxy ip to :7894 meta mark set 0x100 counter accept comment "proxy-udp-tproxy"
+	}
+
+	chain filter_prerouting {
 		type filter hook prerouting priority filter; policy accept;
-		ip daddr @proxy_ip ip protocol { tcp, udp } jump clashproxy
+		ip daddr @proxy_ip ip protocol udp jump clashproxy_udp
 		return
 	}
 
+	# Router's own TCP: prerouting never sees locally generated traffic,
+	# so redirect in the nat output chain as well
+	chain nat_output {
+		type nat hook output priority dstnat; policy accept;
+		ip daddr @proxy_ip ip protocol tcp redirect to :7893 counter comment "proxy-tcp-local"
+	}
+
+	# Router's own UDP: mark + policy route back to lo, then caught by
+	# the filter_prerouting tproxy above
 	chain filter_output {
 		type route hook output priority 0; policy accept;
-		ip daddr @proxy_ip ip protocol { tcp, udp } meta mark set 0x100 counter accept comment "reroute"
+		ip daddr @proxy_ip ip protocol udp meta mark set 0x100 counter accept comment "reroute-udp"
 		return
 	}
 }
