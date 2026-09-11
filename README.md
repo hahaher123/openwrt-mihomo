@@ -117,15 +117,23 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 > [!IMPORTANT]
 > 2024 年 11 月起 OpenWrt 默认使用 apk 包管理器，本仓库仅支持构建 APK 包，不再支持 IPK。
 
-## 下载
+## 下载与发布
 
-本仓库 **不发布 GitHub Release**：CI 只是每 6 小时跟随上游最新 tag 的自动构建校验，产物是临时的、且只包含 mihomo 包本体（不含 LuCI 界面），用固定 tag 发布容易被误当成"最新代码的成品包"，故不再对外发布。需要构建日志或临时产物可查看 [Actions](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/build.yml) 的每次运行。
+发布由**手动触发**的 GitHub Actions 工作流完成，一次构建并发布两个包：
 
-请按上一节在 OpenWrt 25.12.2 SDK 中自行编译（一条命令同时产出 mihomo 与 luci-app-mihomo 两个 APK）。上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。
+1. 打开 [Actions → Build and release Mihomo APK](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/build.yml)
+2. 点右上角 **Run workflow**（分支选 `main`）
+3. 构建完成后自动打 tag 并发布 [Release](https://github.com/hahaher123/openwrt-mihomo/releases)，产物含 x86_64 与 aarch64_generic 两个架构
 
-安装示例（APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖）：
+**tag 规则**：`v<mihomo 版本>-r<包修订>-luci<LuCI 版本>-r<包修订>`，当前版本为 **`v1.19.30-r8-luci1.0.1-r5`**。两个包**任意一个版本变化都会产生新 tag**，因此 Release 始终与代码一致；同一版本重复运行只会覆盖更新已有 Release 的资产，不会出现「看着最新、其实是旧代码」的成品包。
+
+> [!IMPORTANT]
+> **配套声明**：`luci-app-mihomo` 是为本项目打包的 mihomo 定制的——界面上的每个开关都直接操作本项目的 uci 配置项（`/etc/config/mihomo`）、init.d 命令（`/etc/init.d/mihomo`，含 `tproxystatus`）与 `/etc/mihomo/tproxy.sh`、`/etc/mihomo/clash.nft`。请与**同一 Release 内**的 mihomo 配套安装；若使用**其他来源或其他版本**的 mihomo，界面需要自行适配。本项目也**不会自动跟随** mihomo 上游新版本，升级 mihomo 后需手动适配 LuCI 再重新发版。
+
+安装示例（x86_64；APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖）：
 
 ```
-$ apk add mihomo-1.19.30-r8_aarch64_generic.apk --allow-untrusted
-$ apk add luci-app-mihomo-1.0.1-r5_aarch64_generic.apk --allow-untrusted
+$ apk add --allow-untrusted mihomo-1.19.30-r8_x86_64.apk luci-app-mihomo-1.0.1-r5.apk
 ```
+
+也可以按上一节在 OpenWrt 25.12.2 SDK 中自行编译（一条命令同时产出两个 APK）。上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。

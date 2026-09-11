@@ -1,42 +1,65 @@
-name: Build Mihomo.apk
+name: Build and release Mihomo APK
 
+# 手动触发：在 Actions 页面点 "Run workflow" 即可。
+# 一次构建 x86_64 / aarch64_generic 两个架构的 APK（含 mihomo 与 luci-app-mihomo
+# 两个包），按两个 Makefile 中的当前版本打 tag 并发布 Release。
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
 
 permissions:
-  actions: write
-  contents: read
+  contents: write
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build APK and publish release
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [aarch64_generic, x86_64]
 
     steps:
       - name: Checkout source tree
         uses: actions/checkout@v6
 
-      - name: Get latest mihomo version
+      - name: Read package versions
         run: |
-          TAG=$(curl -s "https://api.github.com/repos/MetaCubeX/mihomo/tags" | jq -r '.[0].name' | tr -d 'v')
-          echo "TAG=$TAG" >> $GITHUB_ENV
+          MIHOMO_VER=$(grep -m1 '^PKG_VERSION:=' mihomo/Makefile | cut -d= -f2 | tr -d ' ')
+          MIHOMO_REL=$(grep -m1 '^PKG_RELEASE:=' mihomo/Makefile | cut -d= -f2 | tr -d ' ')
+          LUCI_VER=$(grep -m1 '^PKG_VERSION:=' luci-app-mihomo/Makefile | cut -d= -f2 | tr -d ' ')
+          LUCI_REL=$(grep -m1 '^PKG_RELEASE:=' luci-app-mihomo/Makefile | cut -d= -f2 | tr -d ' ')
 
-      - name: Install deps
+          MIHOMO_FULL="${MIHOMO_VER}-r${MIHOMO_REL}"
+          LUCI_FULL="${LUCI_VER}-r${LUCI_REL}"
+          TAG="v${MIHOMO_FULL}-luci${LUCI_FULL}"
+
+          {
+            echo "MIHOMO_VER=${MIHOMO_VER}"
+            echo "MIHOMO_REL=${MIHOMO_REL}"
+            echo "MIHOMO_FULL=${MIHOMO_FULL}"
+            echo "LUCI_VER=${LUCI_VER}"
+            echo "LUCI_REL=${LUCI_REL}"
+            echo "LUCI_FULL=${LUCI_FULL}"
+            echo "TAG=${TAG}"
+            echo "TITLE=mihomo ${MIHOMO_FULL} + luci-app-mihomo ${LUCI_FULL}"
+          } >> $GITHUB_ENV
+
+          {
+            echo "### 待发布版本"
+            echo ""
+            echo "| 软件包 | 版本 |"
+            echo "| --- | --- |"
+            echo "| mihomo | ${MIHOMO_FULL} |"
+            echo "| luci-app-mihomo | ${LUCI_FULL} |"
+            echo ""
+            echo "tag: ${TAG}"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Install build dependencies
         run: |
-          sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-            python3-setuptools rsync swig unzip zlib1g-dev file wget jq
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget jq zstd
 
       - name: Generate build keys
         run: |
-          sudo apt-get update
           sudo apt-get install -y signify-openbsd
           signify-openbsd -G -n -c 'DO NOT USE - OpenWrt packages feed CI' -p packages_ci.pub -s packages_ci.sec
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
@@ -50,43 +73,133 @@ jobs:
           go-version: 'stable'
 
       - name: Show go version
+        run: go version
+
+      - name: Build APKs (x86_64, aarch64_generic)
         run: |
-          go version
+          set -e
+          mkdir -p dist
 
-      - name: Build
-        run: |
-          case "${{ matrix.arch }}" in
-            aarch64_generic)
-              TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/rockchip/armv8/"
-              ;;
-            x86_64)
-              TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/"
-              ;;
-          esac
+          for ARCH in x86_64 aarch64_generic; do
+            case "$ARCH" in
+              x86_64)          TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/" ;;
+              aarch64_generic) TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/rockchip/armv8/" ;;
+            esac
 
-          SDK=$(curl -s -L "${TARGET_URL}sha256sums" | grep sdk | sed 's/.* \*//')
-          wget "${TARGET_URL}${SDK}" -O sdk.tar.xz
+            echo "::group::Building ${ARCH}"
+            rm -rf sdk sdk.tar.xz
 
-          mkdir sdk
-          tar -I zstd -xf sdk.tar.xz --strip-components=1 -C sdk
-          cd sdk
-          ./scripts/feeds update -a
-          wget "${TARGET_URL}config.buildinfo" -O .config
-          make defconfig
-          cp -a ../mihomo package/
-          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=${{ env.TAG }}/g' package/mihomo/Makefile
-          grep -E '^PKG_(VERSION|RELEASE)' package/mihomo/Makefile
-          make package/mihomo/{download,check} FIXUP=1 V=s
-          make package/mihomo/compile V=s
+            SDK=$(curl -s -L "${TARGET_URL}sha256sums" | grep sdk | sed 's/.* \*//')
+            wget -q "${TARGET_URL}${SDK}" -O sdk.tar.xz
+            mkdir sdk
+            tar -I zstd -xf sdk.tar.xz --strip-components=1 -C sdk
 
-          find bin/packages -name '*.apk' -exec sh -c 'mv "$1" "${1%.apk}_${{ matrix.arch }}.apk"' _ {} \;
-          FN=$(find bin/packages -name '*.apk' | sort | head -1 | xargs basename)
-          echo "PKG_NAME=$FN" >> $GITHUB_ENV
-          cd -
+            cd sdk
+            ./scripts/feeds update -a
+            ./scripts/feeds install -a
+            wget -q "${TARGET_URL}config.buildinfo" -O .config
+            make defconfig
 
-      - name: Upload build artifact
+            cp -a ../mihomo ../luci-app-mihomo package/
+            echo "--- versions baked into this build ---"
+            grep -hE '^PKG_(VERSION|RELEASE):=' package/mihomo/Makefile package/luci-app-mihomo/Makefile
+
+            # 地理数据库由 mihomo Makefile 里的 Download/ 块获取，必须先 download
+            make package/mihomo/{download,check} FIXUP=1 V=s
+            # luci-app-mihomo 硬依赖 +mihomo，编译它即会自动先编译 mihomo
+            make package/luci-app-mihomo/compile V=s
+            cd ..
+
+            find sdk/bin/packages \( -name 'mihomo*.apk' -o -name 'luci-app-mihomo*.apk' \) -print | while read -r f; do
+              base=$(basename "$f" .apk)
+              case "$f" in
+                */all/*) dst="dist/${base}.apk" ;;
+                *)       dst="dist/${base}_${ARCH}.apk" ;;
+              esac
+              cp -f "$f" "$dst"
+              echo "collected: $dst"
+            done
+            echo "::endgroup::"
+          done
+
+          echo "--- release assets ---"
+          ls -l dist/
+          [ -n "$(ls -A dist 2>/dev/null)" ] || { echo "::error::no APK was produced"; exit 1; }
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.PKG_NAME }}
-          path: |
-            sdk/bin/packages/*/*/mihomo*.apk
+          name: mihomo-apk
+          path: dist/*.apk
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          # ---------- release notes ----------
+          cat > release_notes.md <<'EOF'
+          # mihomo @MIHOMO_FULL@ + luci-app-mihomo @LUCI_FULL@
+
+          本 Release 由手动触发的 GitHub Actions 构建，基于 OpenWrt **25.12.2 SDK**，APK 包格式（适用于 OpenWrt 24.10+ / 25.x）。
+
+          | 软件包 | 版本 | 架构 |
+          | --- | --- | --- |
+          | mihomo | `@MIHOMO_FULL@` | x86_64、aarch64_generic |
+          | luci-app-mihomo | `@LUCI_FULL@` | all（与架构无关，两个架构通用） |
+
+          ## 配套说明（请务必阅读）
+
+          **本 LuCI 界面是为本项目打包的 mihomo 量身定制的，两者必须配套使用。**
+
+          - 界面上的每一项功能都直接操作本项目 mihomo 提供的接口：uci 配置文件 `/etc/config/mihomo`、init.d 服务脚本 `/etc/init.d/mihomo`（含 `tproxystatus` 检查命令）、`/etc/mihomo/tproxy.sh` 与 `/etc/mihomo/clash.nft`
+          - 请**配套安装本 Release 内的两个包**：mihomo `@MIHOMO_FULL@` ↔ luci-app-mihomo `@LUCI_FULL@`
+          - 若使用**其他来源或其他版本**的 mihomo，本界面需要**自行适配**（配置项名称、init.d 命令、脚本路径都可能不一致）
+          - 本项目**不会自动跟随 mihomo 上游新版本**：升级 mihomo 版本后需手动适配 LuCI 界面与配置项，再重新发版
+
+          EOF
+
+          sed -i "s|@MIHOMO_FULL@|${MIHOMO_FULL}|g; s|@LUCI_FULL@|${LUCI_FULL}|g" release_notes.md
+
+          X86=$(ls dist/*x86_64*.apk | xargs -n1 basename | tr '\n' ' ')
+          ARM=$(ls dist/*aarch64*.apk | xargs -n1 basename | tr '\n' ' ')
+          LUCI=$(ls dist/luci-app-mihomo*.apk | xargs -n1 basename | tr '\n' ' ')
+
+          {
+            echo "## 附件"
+            echo ""
+            for f in dist/*.apk; do printf -- '- `%s`\n' "$(basename "$f")"; done
+            echo ""
+            echo "## 安装（按架构二选一，luci-app-mihomo 为 all 架构，两个架构通用）"
+            echo ""
+            echo '```sh'
+            echo "# x86_64"
+            echo "apk add --allow-untrusted ${X86}${LUCI}"
+            echo ""
+            echo "# aarch64_generic"
+            echo "apk add --allow-untrusted ${ARM}${LUCI}"
+            echo '```'
+          } >> release_notes.md
+
+          # ---------- tag ----------
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag ${TAG} 已存在，沿用现有 tag"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null
+            echo "已创建 tag ${TAG} -> ${GITHUB_SHA}"
+          fi
+
+          # ---------- release ----------
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::warning::Release ${TAG} 已存在，覆盖其中的 APK 资产（如需区分新产物请先递增 PKG_RELEASE）"
+            gh release upload "${TAG}" dist/*.apk --clobber
+          else
+            gh release create "${TAG}" \
+              --title "${TITLE}" \
+              --notes-file release_notes.md \
+              dist/*.apk
+          fi
+
+          echo "release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
