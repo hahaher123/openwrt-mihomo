@@ -92,10 +92,13 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 
 ## 下载
 
-本仓库 CI 每 6 小时跟随上游最新 tag 自动构建 aarch64_generic / x86_64 的 APK，见 [Releases](https://github.com/hahaher123/openwrt-mihomo/releases)。上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。
+本仓库 **不发布 GitHub Release**：CI 只是每 6 小时跟随上游最新 tag 的自动构建校验，产物是临时的、且只包含 mihomo 包本体（不含 LuCI 界面），用固定 tag 发布容易被误当成"最新代码的成品包"，故不再对外发布。需要构建日志或临时产物可查看 [Actions](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/build.yml) 的每次运行。
+
+请按上一节在 OpenWrt 25.12.2 SDK 中自行编译（一条命令同时产出 mihomo 与 luci-app-mihomo 两个 APK）。上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。
 
 安装示例（APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖）：
 
 ```
-$ apk add mihomo-1.19.30-r1_aarch64_generic.apk --allow-untrusted
+$ apk add mihomo-1.19.30-r7_aarch64_generic.apk --allow-untrusted
+$ apk add luci-app-mihomo-1.0.1-r4_aarch64_generic.apk --allow-untrusted
 ```
