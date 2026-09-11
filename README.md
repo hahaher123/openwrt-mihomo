@@ -45,7 +45,12 @@ openwrt-mihomo/
 - 混合模式：**TCP 走 REDIRECT**（`redir-port: 7893`，nat 链，无需策略路由）、**UDP 走 TPROXY**（`tproxy-port: 7894`，filter 链 + fwmark 策略路由）
 - 在线编辑 `/etc/mihomo/tproxy.sh`（策略路由脚本，start/stop 双模式）与 `/etc/mihomo/clash.nft`（混合模式规则，含代理网段集合 `proxy_ip`），保存后重启服务生效
 - 「检查规则状态」按钮：调用 init.d 的 `tproxystatus` 命令，显示当前 `ip rule`、路由表 256 与 nft 表内容，一目了然确认规则是否生效
-- 要求 mihomo 配置文件同时设置 `redir-port: 7893` 与 `tproxy-port: 7894`（两个端口不能相同）；**不要**同时保留旧版 fw4 include 文件 `/etc/nftables.d/11-clash.nft`，否则规则重复
+- 要求 mihomo 配置文件同时设置 `redir-port: 7893` 与 `tproxy-port: 7894`（两个端口不能相同）；启动时若检测到缺失会在系统日志给出警告；**不要**同时保留旧版 fw4 include 文件 `/etc/nftables.d/11-clash.nft`，否则规则重复
+
+**透明代理排查要点**
+- 规则未生效先看系统日志有无 `failed to load /etc/mihomo/clash.nft`——nft 加载是**整体原子操作，任意一行报错则整个文件都不生效**（此时不会加到任何规则，看起来就是"启用了但没捕获到流量"）
+- `nft list table inet clash` 查看每条规则的 `packets/bytes` 计数：为 0 说明流量未匹配，检查 `proxy_ip` 网段是否覆盖目标地址、以及客户端流量是否真的经路由器转发
+- 编辑规则时注意：`redirect` / `accept` / `return` 等属于**终止语句**，必须写在一条规则的最后，其后不能再接 `counter`、`comment`；否则报 `Statement after terminal statement has no effect`（正确写法：`... counter comment "xxx" redirect to :7893`）
 
 修改参数后点击「保存并应用」会自动重启服务使其生效（由 init.d 的 `reload_service` 配合完成）。
 

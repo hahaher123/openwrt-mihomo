@@ -44,7 +44,7 @@ table inet clash {
 	# original destination recovered by mihomo via SO_ORIGINAL_DST)
 	chain nat_prerouting {
 		type nat hook prerouting priority dstnat; policy accept;
-		ip daddr @proxy_ip ip protocol tcp redirect to :7893 counter comment "proxy-tcp-redirect"
+		ip daddr @proxy_ip ip protocol tcp counter comment "proxy-tcp-redirect" redirect to :7893
 	}
 
 	# Forwarded UDP: TPROXY (filter chain only; needs the fwmark policy
@@ -64,7 +64,7 @@ table inet clash {
 	# so redirect in the nat output chain as well
 	chain nat_output {
 		type nat hook output priority dstnat; policy accept;
-		ip daddr @proxy_ip ip protocol tcp redirect to :7893 counter comment "proxy-tcp-local"
+		ip daddr @proxy_ip ip protocol tcp counter comment "proxy-tcp-local" redirect to :7893
 	}
 
 	# Router's own UDP: mark + policy route back to lo, then caught by

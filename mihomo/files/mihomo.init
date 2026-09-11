@@ -44,8 +44,15 @@ start_service() {
                         return 1
                 }
                 nft delete table inet clash 2>/dev/null
-                [ -f /etc/mihomo/clash.nft ] && nft -f /etc/mihomo/clash.nft
+                if [ -f /etc/mihomo/clash.nft ]; then
+                        nft -f /etc/mihomo/clash.nft || \
+                                echo "Error: failed to load /etc/mihomo/clash.nft, transparent proxy rules NOT applied" >&2
+                fi
                 [ -f /etc/mihomo/tproxy.sh ] && sh /etc/mihomo/tproxy.sh start
+                grep -qE '^[[:space:]]*redir-port[[:space:]]*:' "$conffile" || \
+                        echo "Warning: 'redir-port' not set in $conffile, TCP redirect will not work" >&2
+                grep -qE '^[[:space:]]*tproxy-port[[:space:]]*:' "$conffile" || \
+                        echo "Warning: 'tproxy-port' not set in $conffile, UDP tproxy will not work" >&2
         fi
 
         procd_open_instance "$NAME.main"
