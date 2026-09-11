@@ -29,7 +29,7 @@ openwrt-mihomo/
 - 开机自启开关（`enabled`）
 - 配置文件路径（`conffile`，默认 `/etc/mihomo/config.yaml`）
 - 工作目录（`workdir`，默认 `/etc/mihomo`）
-- 运行用户（`user`，TUN 模式请保持 root）
+- 运行用户（`user`，使用透明代理（REDIRECT/TPROXY）时请保持 root）
 - 监听接口列表（`ifaces`，网络变动时自动重启服务）
 - 标准输出 / 错误输出写入系统日志开关（`log_stdout` / `log_stderr`）
 - 后台管理地址（`dashboard`，供「后台管理」页内嵌使用）
@@ -45,7 +45,7 @@ openwrt-mihomo/
 - 混合模式：**TCP 走 REDIRECT**（`redir-port: 7893`，nat 链，无需策略路由）、**UDP 走 TPROXY**（`tproxy-port: 7894`，filter 链 + fwmark 策略路由）
 - 在线编辑 `/etc/mihomo/tproxy.sh`（策略路由脚本，start/stop 双模式）与 `/etc/mihomo/clash.nft`（混合模式规则，含代理网段集合 `proxy_ip`），保存后重启服务生效
 - 「检查规则状态」按钮：调用 init.d 的 `tproxystatus` 命令，显示当前 `ip rule`、路由表 256 与 nft 表内容，一目了然确认规则是否生效
-- 要求 mihomo 配置文件同时设置 `redir-port: 7893` 与 `tproxy-port: 7894`（两个端口不能相同）；启动时若检测到缺失会在系统日志给出警告；**不要**同时保留旧版 fw4 include 文件 `/etc/nftables.d/11-clash.nft`，否则规则重复
+- 要求 mihomo 配置文件同时设置 `redir-port: 7893` 与 `tproxy-port: 7894`（两个端口不能相同，详见下文「透明代理配置」章节）；启动时若检测到缺失会在系统日志给出警告；**不要**同时保留旧版 fw4 include 文件 `/etc/nftables.d/11-clash.nft`，否则规则重复
 
 **透明代理排查要点**
 - 规则未生效先看系统日志有无 `failed to load /etc/mihomo/clash.nft`——nft 加载是**整体原子操作，任意一行报错则整个文件都不生效**（此时不会加到任何规则，看起来就是"启用了但没捕获到流量"）
@@ -59,20 +59,47 @@ openwrt-mihomo/
 * OpenWrt 25.12.2+
 * 了解 OpenWrt 基本操作、终端使用，以及基本的 [mihomo 配置](https://wiki.metacubex.one/config/)
 
-## 透明代理配置（TUN auto-redirect）
+## 透明代理配置（nft REDIRECT + TPROXY 混合模式）
 
-利用 mihomo 的 `auto-redirect` 特性：
+本项目的透明代理**不使用 TUN 模式**，也不需要 `tun:` 配置块与 `auto-redirect`：规则由 init.d 在 mihomo 启动前加载 `/etc/mihomo/clash.nft`（独立表 `inet clash`）实现，**转发流量与路由器自身流量均覆盖**：
+
+| 流量 | 处理方式 | 落点 |
+|---|---|---|
+| 转发 TCP（prerouting） | nat 链 `redirect` | `redir-port` **7893** |
+| 转发 UDP（filter prerouting） | `tproxy` + fwmark `0x100` | `tproxy-port` **7894** |
+| 本机 TCP（nat output） | nat 链 `redirect` | `redir-port` 7893 |
+| 本机 UDP（route output） | 打 mark 回环，再被 prerouting 的 tproxy 接住 | `tproxy-port` 7894 |
+
+> `redirect` 是 NAT 语句、`tproxy` 只能用于 filter 类型的 prerouting 链，两者语法上无法混在一条链里，因此 `clash.nft` 拆成了 nat / filter 两组链。
+
+### mihomo 配置文件要求
+
+`/etc/mihomo/config.yaml` 必须同时启用两个透明代理入口端口，且端口号与 `clash.nft` 中的 `:7893` / `:7894` 保持一致：
 
 ```yaml
-tun:
-  enable: true
-  stack: mixed
-  dns-hijack:
-    - "any:53"
-  auto-route: true
-  auto-redirect: true # 关键配置
-  auto-detect-interface: true
+redir-port: 7893    # TCP REDIRECT 入口（对应 clash.nft: redirect to :7893）
+tproxy-port: 7894   # UDP TPROXY 入口（对应 clash.nft: tproxy ip to :7894）
 ```
+
+- **两个端口不能相同**：mihomo 的 redir 与 tproxy 是两个独立监听器，绑同一端口会报 `Address already in use`
+- init.d 启动时会检查配置文件中是否存在这两个端口，缺失则在系统日志给出警告
+- **不要启用 `tun:`**：TUN 栈（含 `auto-route` / `auto-redirect` / `dns-hijack`）与本套 nft 规则会同时改写路由与流量，互相干扰，二选一即可
+
+### 分流由 `proxy_ip` 集合决定
+
+`clash.nft` 顶部的 `proxy_ip` 集合列出**需要被代理的目标网段**，只有命中该集合的流量才会进入 mihomo：
+
+- 默认包含 fake-ip 段 `198.18.0.0/16`。若 mihomo 配置 `dns.enhanced-mode: fake-ip`（默认 `fake-ip-range` 即 `198.18.0.1/16`），域名解析结果会落在该网段，从而被规则统一捕获——这是最省心的用法
+- 若按真实 IP 分流（`enhanced-mode: redir-host` 或仅按 IP 直连/代理），需把目标网段（如 Telegram、特定 CDN 段）加入 `proxy_ip` 集合，否则规则天然不命中
+- `private` 集合用于 UDP 排除内网目标，无需改动
+
+### 使用步骤
+
+1. 在「运行参数」页确认配置文件路径与工作目录（默认 `/etc/mihomo/config.yaml`、`/etc/mihomo`）
+2. 编辑 `/etc/mihomo/config.yaml`，加上上面的 `redir-port` / `tproxy-port`
+3. 打开「透明代理」页开关（`transparent=1`），保存并应用——服务会重启，规则随之加载
+4. 用「检查规则状态」确认 `ip rule`、路由表 256 与 `inet clash` 表均已就位
+5. 路由器上**删除**旧的 `/etc/nftables.d/11-clash.nft`（fw4 include 形式），避免与独立表重复加载
 
 更多用法可参考原作者的 [gist 笔记](https://gist.github.com/douglarek/99fb8d7f30fac2a6d2e9a32a47296e30)。
 
@@ -99,6 +126,6 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 安装示例（APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖）：
 
 ```
-$ apk add mihomo-1.19.30-r7_aarch64_generic.apk --allow-untrusted
-$ apk add luci-app-mihomo-1.0.1-r4_aarch64_generic.apk --allow-untrusted
+$ apk add mihomo-1.19.30-r8_aarch64_generic.apk --allow-untrusted
+$ apk add luci-app-mihomo-1.0.1-r5_aarch64_generic.apk --allow-untrusted
 ```

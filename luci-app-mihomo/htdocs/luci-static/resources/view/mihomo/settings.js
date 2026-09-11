@@ -27,7 +27,7 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'user', _('运行用户'),
-			_('运行 Mihomo 的系统用户。使用 TUN 模式时请保持 root。'));
+			_('运行 Mihomo 的系统用户。使用透明代理（REDIRECT/TPROXY）时请保持 root。'));
 		o.placeholder = 'root';
 		o.rmempty = false;
 
