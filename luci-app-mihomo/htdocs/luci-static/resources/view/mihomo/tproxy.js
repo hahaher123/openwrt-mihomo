@@ -36,9 +36,20 @@ return view.extend({
 		outputPre.textContent = _('检查中…');
 
 		return fs.exec('/etc/init.d/mihomo', [ 'tproxystatus' ]).then(function(res) {
-			outputPre.textContent = (res && res.stdout) ? res.stdout : _('(无输出)');
+			var out = (res && res.stdout) ? res.stdout : '';
+			if (res && res.stderr)
+				out += (out ? '\n' : '') + '[stderr]\n' + res.stderr;
+
+			outputPre.textContent = out || _('(无输出)');
 		}).catch(function(e) {
-			outputPre.textContent = _('检查失败: %s').format(String(e.message || e));
+			// rc.common prints its usage text on the stdout stream, so show
+			// both streams when the command fails instead of a bare message.
+			var msg = (e && (e.stdout || e.stderr)) || String(e.message || e);
+
+			if (e && e.stdout && e.stderr)
+				msg = e.stdout + '\n[stderr]\n' + e.stderr;
+
+			outputPre.textContent = _('检查失败: %s').format(msg);
 		});
 	},
 

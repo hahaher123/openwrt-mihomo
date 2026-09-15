@@ -3,6 +3,12 @@
 USE_PROCD=1
 START=99
 
+# Custom command for the LuCI "透明代理" page: /etc/init.d/mihomo tproxystatus
+# Without EXTRA_COMMANDS the rc.common dispatcher rejects the argument and
+# prints the usage text instead of running the function below.
+EXTRA_COMMANDS="tproxystatus"
+EXTRA_HELP="	tproxystatus	Show transparent proxy policy route and nft rules"
+
 script=$(readlink "$initscript")
 NAME="$(basename ${script:-$initscript})"
 PROG="/usr/bin/mihomo"
@@ -77,14 +83,22 @@ stop_service() {
 }
 
 tproxystatus() {
+        [ -f /etc/config/$NAME ] && config_load "$NAME"
+        local transparent
+        config_get_bool transparent "main" "transparent" "0"
+
+        echo "uci mihomo.main.transparent = $transparent$([ "$transparent" -eq 1 ] || echo '  (透明代理未开启, 规则应为空)')"
+        echo
         echo "== ip rule =="
         ip rule show
         echo
-        echo "== ip route table 256 =="
-        ip route show table 256
+        echo "== ip route show table 256 =="
+        ip route show table 256 2>&1 | grep . || \
+                echo "(表 256 为空 —— tproxy.sh start 未执行或规则已被移除)"
         echo
         echo "== nft table inet clash =="
-        nft list table inet clash 2>&1
+        nft list table inet clash 2>/dev/null || \
+                echo "(表 inet clash 不存在 —— 透明代理未开启, 或 clash.nft 加载失败)"
         return 0
 }
 

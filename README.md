@@ -125,7 +125,7 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 2. 点右上角 **Run workflow**（分支选 `main`）
 3. 构建完成后自动打 tag 并发布 [Release](https://github.com/hahaher123/openwrt-mihomo/releases)，产物含 x86_64 与 aarch64_generic 两个架构
 
-**tag 规则**：`v<mihomo 版本>-r<包修订>-luci<LuCI 版本>-r<包修订>`，当前版本为 **`v1.19.30-r8-luci1.0.1-r5`**。两个包**任意一个版本变化都会产生新 tag**，因此 Release 始终与代码一致；同一版本重复运行只会覆盖更新已有 Release 的资产，不会出现「看着最新、其实是旧代码」的成品包。
+**tag 规则**：`v<mihomo 版本>-r<包修订>-luci<LuCI 版本>-r<包修订>`，当前版本为 **`v1.19.30-r9-luci1.0.1-r6`**。两个包**任意一个版本变化都会产生新 tag**，因此 Release 始终与代码一致；同一版本重复运行只会覆盖更新已有 Release 的资产，不会出现「看着最新、其实是旧代码」的成品包。
 
 > [!IMPORTANT]
 > **配套声明**：`luci-app-mihomo` 是为本项目打包的 mihomo 定制的——界面上的每个开关都直接操作本项目的 uci 配置项（`/etc/config/mihomo`）、init.d 命令（`/etc/init.d/mihomo`，含 `tproxystatus`）与 `/etc/mihomo/tproxy.sh`、`/etc/mihomo/clash.nft`。请与**同一 Release 内**的 mihomo 配套安装；若使用**其他来源或其他版本**的 mihomo，界面需要自行适配。本项目也**不会自动跟随** mihomo 上游新版本，升级 mihomo 后需手动适配 LuCI 再重新发版。
@@ -133,7 +133,7 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 安装示例（x86_64；APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖）：
 
 ```
-$ apk add --allow-untrusted mihomo-1.19.30-r8_x86_64.apk luci-app-mihomo-1.0.1-r5.apk
+$ apk add --allow-untrusted mihomo-1.19.30-r9_x86_64.apk luci-app-mihomo-1.0.1-r6.apk
 ```
 
 也可以按上一节在 OpenWrt 25.12.2 SDK 中自行编译（一条命令同时产出两个 APK）。上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。
