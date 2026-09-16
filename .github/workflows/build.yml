@@ -17,6 +17,11 @@ jobs:
     steps:
       - name: Checkout source tree
         uses: actions/checkout@v6
+        with:
+          # 发布描述要写「相对上一次发布的改动」，需要完整提交历史与 tag；
+          # 默认的浅克隆（depth=1）会让 `git log <prev-tag>..HEAD` 直接失败。
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Read package versions
         run: |
@@ -155,6 +160,60 @@ jobs:
           | mihomo | `@MIHOMO_FULL@` | x86_64、aarch64_generic |
           | luci-app-mihomo | `@LUCI_FULL@` | all（与架构无关，两个架构通用） |
 
+          EOF
+
+          # ---------- 本次改动（相对上一次发布）----------
+          # 正文主体是「相对上一次发布的改动」，由上一次 Release 的 tag 到本次提交
+          # 之间的提交列表生成（按 conventional-commit 前缀分组）。
+          PREV=$(gh release list --limit 30 --json tagName \
+                   --jq "[.[] | select(.tagName != \"${TAG}\")][0].tagName" 2>/dev/null || true)
+
+          # 兜底：万一本地没有上一个 tag（理论上有 fetch-depth: 0 就有），按需补取
+          if [ -n "${PREV}" ] && ! git rev-parse -q --verify "refs/tags/${PREV}" >/dev/null 2>&1; then
+            git fetch --no-tags --depth=1 origin "refs/tags/${PREV}:refs/tags/${PREV}" >/dev/null 2>&1 || true
+          fi
+
+          if [ -n "${PREV}" ] && git rev-parse -q --verify "refs/tags/${PREV}" >/dev/null 2>&1; then
+            echo "## 本次改动（相对上一次发布 \`${PREV}\`）" >> release_notes.md
+            RANGE="${PREV}..${GITHUB_SHA}"
+          elif [ -n "${PREV}" ]; then
+            echo "::warning::上一次发布为 ${PREV}，但本地取不到该 tag，退化为输出全部提交"
+            echo "## 本次改动" >> release_notes.md
+            RANGE=""
+          else
+            echo "## 本次改动（首次发布）" >> release_notes.md
+            RANGE=""
+          fi
+          echo "" >> release_notes.md
+
+          if [ -n "${RANGE}" ]; then
+            git log --no-merges --pretty='%s' "${RANGE}" > changes.txt
+          else
+            git log --no-merges --pretty='%s' "${GITHUB_SHA}" > changes.txt
+          fi
+
+          if [ -s changes.txt ]; then
+            awk '
+              {
+                line = $0
+                type = "其他"
+                if      (line ~ /^feat(\(|:|!)/)             type = "新增"
+                else if (line ~ /^fix(\(|:|!)/)              type = "修复"
+                else if (line ~ /^(refactor|perf)(\(|:|!)/)  type = "重构与优化"
+                else if (line ~ /^docs(\(|:|!)/)             type = "文档"
+                else if (line ~ /^(ci|build|chore)(\(|:|!)/) type = "构建与维护"
+                sub(/^[A-Za-z]+(\([^)]*\))?!?:[ \t]*/, "", line)
+                if (!(type in seen)) { order[++n] = type; seen[type] = 1 }
+                body[type] = body[type] "- " line "\n"
+              }
+              END { for (i = 1; i <= n; i++) printf "**%s**\n\n%s\n", order[i], body[order[i]] }
+            ' changes.txt >> release_notes.md
+          else
+            echo "与上一次发布相比没有代码改动（同版本重复运行，仅重新构建并覆盖资产）。" >> release_notes.md
+            echo "" >> release_notes.md
+          fi
+
+          cat >> release_notes.md <<'EOF'
           ## 配套说明（请务必阅读）
 
           **本 LuCI 界面是为本项目打包的 mihomo 量身定制的，两者必须配套使用。**
@@ -201,6 +260,8 @@ jobs:
           if gh release view "${TAG}" >/dev/null 2>&1; then
             echo "::warning::Release ${TAG} 已存在，覆盖其中的 APK 资产（如需区分新产物请先递增 PKG_RELEASE）"
             gh release upload "${TAG}" dist/*.apk --clobber
+            # 同一版本重跑时描述也要一并刷新，否则会停留在上一次运行生成的正文
+            gh release edit "${TAG}" --title "${TITLE}" --notes-file release_notes.md
           else
             gh release create "${TAG}" \
               --title "${TITLE}" \
