@@ -10,6 +10,7 @@
 openwrt-mihomo/
 ├── mihomo/            # mihomo 包（安装 /usr/bin/mihomo、/etc/init.d/mihomo、/etc/config/mihomo）
 └── luci-app-mihomo/   # LuCI 管理界面（依赖 mihomo 包，编译时自动先编译 mihomo）
+                       # 另随包装入 /etc/mihomo/config.sh（「配置文件」页的远程导入辅助脚本）
 ```
 
 - **mihomo 包**：面向 OpenWrt 25 的原生 mihomo 构建（APK 包格式），自带 procd init 脚本与 uci 配置
@@ -63,7 +64,7 @@ openwrt-mihomo/
 - **结果提示**：所有操作的结论（校验通过/失败、保存成功/失败、重启结果、导入结果）都以页面顶部的**醒目横幅**呈现（颜色区分成功/失败/警告），并附上 mihomo 的原始输出（校验失败时含具体报错行）；同一结论也会弹出通知
 
 > [!NOTE]
-> 本页需要 mihomo 包内的 `/etc/mihomo/config.sh` 辅助脚本（随包安装）。远程导入依赖路由器能直连订阅地址；若订阅地址需经代理访问，请先配置好网络出口。
+> 本页需要 `/etc/mihomo/config.sh` 辅助脚本，由 **luci-app-mihomo 包**随装（该脚本只为界面服务，mihomo 守护进程并不使用，因此不打进 mihomo 包）。远程导入依赖路由器能直连订阅地址；若订阅地址需经代理访问，请先配置好网络出口。
 
 ## 前置要求
 
