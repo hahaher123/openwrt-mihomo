@@ -194,6 +194,8 @@ jobs:
 
           if [ -s changes.txt ]; then
             awk '
+              # 纯维护类提交（ci / build / chore）与用户无关，整条不进描述
+              /^(ci|build|chore)(\(|:|!)/ { next }
               {
                 line = $0
                 type = "其他"
@@ -201,51 +203,22 @@ jobs:
                 else if (line ~ /^fix(\(|:|!)/)              type = "修复"
                 else if (line ~ /^(refactor|perf)(\(|:|!)/)  type = "重构与优化"
                 else if (line ~ /^docs(\(|:|!)/)             type = "文档"
-                else if (line ~ /^(ci|build|chore)(\(|:|!)/) type = "构建与维护"
                 sub(/^[A-Za-z]+(\([^)]*\))?!?:[ \t]*/, "", line)
                 if (!(type in seen)) { order[++n] = type; seen[type] = 1 }
                 body[type] = body[type] "- " line "\n"
               }
-              END { for (i = 1; i <= n; i++) printf "**%s**\n\n%s\n", order[i], body[order[i]] }
+              END {
+                # 过滤后可能一条不剩（例如整段都是 ci），此处兜底，避免留下空章节
+                if (n == 0) { print "与上一次发布相比没有代码改动。"; exit }
+                for (i = 1; i <= n; i++) printf "**%s**\n\n%s\n", order[i], body[order[i]]
+              }
             ' changes.txt >> release_notes.md
           else
             echo "与上一次发布相比没有代码改动（同版本重复运行，仅重新构建并覆盖资产）。" >> release_notes.md
             echo "" >> release_notes.md
           fi
 
-          cat >> release_notes.md <<'EOF'
-          ## 配套说明（请务必阅读）
-
-          **本 LuCI 界面是为本项目打包的 mihomo 量身定制的，两者必须配套使用。**
-
-          - 界面上的每一项功能都直接操作本项目 mihomo 提供的接口：uci 配置文件 `/etc/config/mihomo`、init.d 服务脚本 `/etc/init.d/mihomo`（含 `tproxystatus` 检查命令）、`/etc/mihomo/tproxy.sh` 与 `/etc/mihomo/clash.nft`
-          - 请**配套安装本 Release 内的两个包**：mihomo `@MIHOMO_FULL@` ↔ luci-app-mihomo `@LUCI_FULL@`
-          - 若使用**其他来源或其他版本**的 mihomo，本界面需要**自行适配**（配置项名称、init.d 命令、脚本路径都可能不一致）
-          - 本项目**不会自动跟随 mihomo 上游新版本**：升级 mihomo 版本后需手动适配 LuCI 界面与配置项，再重新发版
-
-          EOF
-
           sed -i "s|@MIHOMO_FULL@|${MIHOMO_FULL}|g; s|@LUCI_FULL@|${LUCI_FULL}|g" release_notes.md
-
-          X86=$(ls dist/*x86_64*.apk | xargs -n1 basename | tr '\n' ' ')
-          ARM=$(ls dist/*aarch64*.apk | xargs -n1 basename | tr '\n' ' ')
-          LUCI=$(ls dist/luci-app-mihomo*.apk | xargs -n1 basename | tr '\n' ' ')
-
-          {
-            echo "## 附件"
-            echo ""
-            for f in dist/*.apk; do printf -- '- `%s`\n' "$(basename "$f")"; done
-            echo ""
-            echo "## 安装（按架构二选一，luci-app-mihomo 为 all 架构，两个架构通用）"
-            echo ""
-            echo '```sh'
-            echo "# x86_64"
-            echo "apk add --allow-untrusted ${X86}${LUCI}"
-            echo ""
-            echo "# aarch64_generic"
-            echo "apk add --allow-untrusted ${ARM}${LUCI}"
-            echo '```'
-          } >> release_notes.md
 
           # ---------- tag ----------
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
