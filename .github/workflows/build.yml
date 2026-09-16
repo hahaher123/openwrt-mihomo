@@ -150,11 +150,9 @@ jobs:
           set -e
 
           # ---------- release notes ----------
+          # 正文不带自身标题与构建说明：版本号已由 Release 标题（--title）给出，
+          # 正文里再写一遍会与页面标题完全重复。正文 = 版本表 + 本次改动。
           cat > release_notes.md <<'EOF'
-          # mihomo @MIHOMO_FULL@ + luci-app-mihomo @LUCI_FULL@
-
-          本 Release 由手动触发的 GitHub Actions 构建，基于 OpenWrt **25.12.2 SDK**，APK 包格式（适用于 OpenWrt 24.10+ / 25.x）。
-
           | 软件包 | 版本 | 架构 |
           | --- | --- | --- |
           | mihomo | `@MIHOMO_FULL@` | x86_64、aarch64_generic |
