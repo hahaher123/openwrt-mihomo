@@ -9,6 +9,9 @@
 				"/usr/bin/mihomo": [ "exec" ],
 				"/sbin/logread": [ "exec" ],
 				"/etc/init.d/mihomo": [ "exec" ],
+				"/etc/mihomo": [ "list" ],
+				"/etc/mihomo/*": [ "read" ],
+				"/etc/mihomo/config.sh": [ "exec" ],
 				"/etc/mihomo/tproxy.sh": [ "read" ],
 				"/etc/mihomo/clash.nft": [ "read" ]
 			},
@@ -17,8 +20,11 @@
 		"write": {
 			"file": {
 				"/etc/init.d/mihomo": [ "exec" ],
+				"/etc/mihomo/*": [ "write" ],
+				"/etc/mihomo/config.sh": [ "exec" ],
 				"/etc/mihomo/tproxy.sh": [ "write" ],
-				"/etc/mihomo/clash.nft": [ "write" ]
+				"/etc/mihomo/clash.nft": [ "write" ],
+				"/tmp/mihomo-config-check.yaml": [ "write" ]
 			},
 			"uci": [ "mihomo" ]
 		}

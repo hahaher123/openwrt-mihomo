@@ -18,7 +18,7 @@ openwrt-mihomo/
 
 ## LuCI 界面功能
 
-服务 → Mihomo，包含两个页面：
+服务 → Mihomo，包含五个页面（菜单顺序：运行状态 → 运行参数 → 透明代理 → 配置文件 → 后台管理）：
 
 **「运行状态」页**
 - 实时显示服务运行状态（运行中/未运行）、进程 PID、开机自启开关状态、mihomo 程序版本（每 5 秒自动刷新）
@@ -53,6 +53,17 @@ openwrt-mihomo/
 - 编辑规则时注意语句顺序：`redirect` / `accept` / `drop` 等属于**终止语句**，必须放在规则的**最后**，其后不能再有 `counter` 等语句，否则报 `Statement after terminal statement has no effect`；而 `comment "..."` 是唯一例外（nft 手册：comment 始终被求值），但它**受限语法约束必须写在规则最末尾**。因此正确写法是 `... counter redirect to :7893 comment "proxy-tcp-redirect"`（counter 在前、redirect 居中、comment 收尾），写成 `... counter comment "xxx" redirect ...` 会报 `syntax error, unexpected redirect`
 
 修改参数后点击「保存并应用」会自动重启服务使其生效（由 init.d 的 `reload_service` 配合完成）。
+
+**「配置文件」页**
+- 管理 workdir（默认 `/etc/mihomo`）下的 clash/mihomo 配置文件（`*.yaml` / `*.yml`）：列出文件、选中其中一个作为运行配置、直接编辑其内容
+- **远程导入**：填入 clash/mihomo 订阅 URL，由包内的 `/etc/mihomo/config.sh import` 完成——先下载到 `/tmp`，用 `mihomo -t` 校验通过后才安装到 `/etc/mihomo`；下载失败或校验失败的配置**不会落盘，也不会覆盖同名文件**。可指定保存的文件名（留空则按 URL 末段自动命名并补 `.yaml` 后缀），勾选「覆盖同名文件」才会覆盖已存在的同名文件
+- **选择运行配置**：选中列表中的一项后，「设为当前配置」写入 uci `mihomo.main.conffile`（与 `/etc/init.d/mihomo` 同源）；「设为当前配置并重启」在写入后再重启服务，使其立即生效。列表中用绿色标签标出**当前生效**的文件
+- **编辑与保存**：直接编辑选中的配置文件内容，提供「校验」/「保存」/「保存并重启」三个按钮。**保存与保存并重启都会先校验，校验不通过不会写入文件**；校验参数与服务启动完全一致（`mihomo -t -f <配置> -d <workdir>`），且在 `/tmp` 中进行，不写 flash
+- 保存后的文件权限为 `0600`（配置文件含订阅凭据，不宜全局可读）
+- **结果提示**：所有操作的结论（校验通过/失败、保存成功/失败、重启结果、导入结果）都以页面顶部的**醒目横幅**呈现（颜色区分成功/失败/警告），并附上 mihomo 的原始输出（校验失败时含具体报错行）；同一结论也会弹出通知
+
+> [!NOTE]
+> 本页需要 mihomo 包内的 `/etc/mihomo/config.sh` 辅助脚本（随包安装）。远程导入依赖路由器能直连订阅地址；若订阅地址需经代理访问，请先配置好网络出口。
 
 ## 前置要求
 

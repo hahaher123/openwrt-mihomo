@@ -1,0 +1,9 @@
+# 统一使用 LF 行尾。
+#
+# OpenWrt 包内的 shell 脚本（/etc/init.d/mihomo、/etc/mihomo/config.sh、tproxy.sh）
+# 一旦带上 CRLF，shebang 会变成 "#!/bin/sh\r"，在路由器上无法执行。luci.mk 安装
+# root/ 用的是 cp -pR（保留权限位），所以包能正常安装、服务却起不来，属于静默失败。
+#
+# Windows 上 git 默认 core.autocrlf=true，工作区会被写成 CRLF 并可能被打进本地构建的
+# 包（CI 在 Linux runner 上不受影响）。这里对所有文本文件强制 LF。
+* text=auto eol=lf
