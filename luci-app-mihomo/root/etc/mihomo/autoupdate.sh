@@ -1,6 +1,10 @@
 #!/bin/sh
 # 定时更新 mihomo 的「服务器与代理组」。
 #
+# 实际动作全部交给 config.sh update: 它只替换 proxies / proxy-groups 两段, 并且
+# 在远程内容与本地一致时什么都不做; 只有内容确实变了才写盘并重启 mihomo。本脚本
+# 只负责把这条命令按 uci 里的设置写进 crontab, 并在关闭时把托管块移除。
+#
 #   autoupdate.sh apply    读取 uci mihomo.autoupdate, 写入 /etc/crontabs/root 并生效
 #   autoupdate.sh set <enabled> <target> <schedule> <url>
 #                          用给定值写 uci 再生效 (LuCI 页面用这条)

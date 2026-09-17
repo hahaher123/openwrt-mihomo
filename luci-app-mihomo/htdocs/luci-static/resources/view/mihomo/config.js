@@ -390,17 +390,16 @@ return view.extend({
 
 	// ---------------- 动作: 仅更新服务器和代理组 ----------------
 
+	// 内容有没有变、要不要重启服务, 都由脚本判断后决定, 页面不再单独提供
+	// 「并重启」按钮 —— 那样两个按钮的行为会完全一样。
 	handleUpdateCfg: function(ev) {
-		return this.doUpdate(false);
-	},
-
-	handleUpdateCfgRestart: function(ev) {
-		return this.doUpdate(true);
+		return this.doUpdate();
 	},
 
 	// 只刷新 proxies / proxy-groups 两段, 其余内容 (rules / dns / tun 等以及
-	// 手动修改) 由脚本原样保留。下载、提取、合并、校验与写入全在服务端完成。
-	doUpdate: function(restart) {
+	// 手动修改) 由脚本原样保留。下载、提取、对比、校验、写入与重启全在服务端
+	// 完成; 脚本最后会打印一行 "RESULT: ..." 说明它究竟做了哪一步。
+	doUpdate: function() {
 		var self = this;
 		var name = this.selected;
 
@@ -444,26 +443,21 @@ return view.extend({
 					return;
 				}
 
-				// 文件已经变了: 刷新列表、订阅链接记录与编辑区
+				// 有变化才写盘、才重启, 这一步由脚本判断; 页面按它给出的
+				// "RESULT: ..." 结论决定提示什么。
+				var kind = (String(out).match(/^RESULT:[ \t]*(\S+)/m) || [])[1] || '';
+
 				return self.refreshList().then(function() {
 					return self.reloadSource();
 				}).then(function() {
 					return self.handlePick(name);
 				}).then(function() {
-					if (!restart) {
+					if (kind === 'unchanged')
+						self.setResult('ok', _('配置无变化, 未做改动'), out);
+					else if (kind === 'updated-restarted')
+						self.setResult('ok', _('已更新服务器和代理组, 并重启服务'), out + self.restartNote());
+					else
 						self.setResult('ok', _('已更新服务器和代理组'), out + self.restartNote());
-						return;
-					}
-
-					self.setResult('info', _('更新成功, 正在重启服务…'), out, true);
-
-					return self.restartService().then(function(r) {
-						var rok = (r && r.code == 0);
-
-						self.setResult(rok ? 'ok' : 'err',
-							rok ? _('已更新服务器和代理组, 并重启服务') : _('已更新, 但服务重启失败 (退出码 %s)').format(r ? r.code : '?'),
-							out + '\n\n' + (joinOutput(r) || _('(无输出)')) + self.restartNote());
-					});
 				});
 			}, function(e) {
 				// 权限不足等 RPC 级失败走这里, 此时没有 code 可看
@@ -928,20 +922,21 @@ return view.extend({
 			E('div', { 'class': 'cbi-map-descr' }, [
 				_('按订阅链接重新拉取, 只替换选中配置里的 proxies (服务器) 与 proxy-groups (代理组) 两段; 其余设置 (rules / dns / tun 等) 以及手动修改过的内容都保持不动。'),
 				E('br'),
-				_('流程: 下载 → 提取两段 → 合并 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。')
+				_('流程: 下载 → 提取两段 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。'),
+				E('br'),
+				_('两段内容与本地一致时不会写盘, 也不会重启服务; 只有内容确实变了才写入并重启 (仅当更新的正是当前生效的配置、且服务正在运行时)。')
 			]),
 			this.updInfo,
 			E('div', { 'style': 'margin:10px 0 6px 0;' }, [ this.updUrl ]),
 			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px;' }, [
-				btn(_('仅更新'), 'handleUpdateCfg', 'cbi-button'),
-				btn(_('仅更新并重启'), 'handleUpdateCfgRestart')
+				btn(_('仅更新'), 'handleUpdateCfg')
 			]),
 
 			E('h3', {}, [ _('定时更新服务器和代理组') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('启用后会写入一条计划任务 (cron), 按设定的频率对选中的配置文件执行与「仅更新」完全相同的流程: 下载订阅 → 只替换 proxies / proxy-groups 两段 → mihomo -t 校验 → 通过才写回文件。'),
+				_('启用后会写入一条计划任务 (cron), 按设定的频率对选中的配置文件执行与「仅更新」完全相同的流程: 下载订阅 → 只替换 proxies / proxy-groups 两段 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。'),
 				E('br'),
-				_('更新不会重启服务, 也不会改动其它设置; 每次结果与失败原因写入系统日志 (logread, 标签 mihomo-autoupdate)。'),
+				_('内容与本地一致时什么都不做 (既不写盘也不重启); 内容有变化时更新配置并重启服务, 让新服务器立即生效。其余设置不会被改动; 每次结果与失败原因写入系统日志 (logread, 标签 mihomo-autoupdate)。'),
 				E('br'),
 				_('计划任务写在 /etc/crontabs/root 里由本页面管理的标记块中, 你自己添加的其它计划任务不受影响。')
 			]),

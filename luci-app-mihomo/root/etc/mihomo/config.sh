@@ -7,7 +7,12 @@
 #   config.sh update <name> [url]           re-download the subscription and
 #                                           replace ONLY the "proxies" and
 #                                           "proxy-groups" sections of an
-#                                           existing profile
+#                                           existing profile. When the remote
+#                                           sections are identical to the local
+#                                           ones nothing is written and the
+#                                           service is left alone; when they
+#                                           differ the file is updated and
+#                                           mihomo is restarted.
 #   config.sh help
 #
 # Only the network facing part lives here; the LuCI "配置文件" page handles
@@ -23,6 +28,7 @@
 [ -s /lib/functions.sh ] && . /lib/functions.sh
 
 PROG="/usr/bin/mihomo"
+INITD="/etc/init.d/mihomo"
 
 # 下载: 单次请求整体超时(秒) / curl 的连接阶段超时 / 总尝试次数 /
 # 首次重试前的等待(秒, 之后翻倍) / 等待上限(秒)
@@ -65,7 +71,11 @@ Usage: $0 import <url> [name] [force]
 Everything downloaded is validated with "mihomo -t" before it replaces
 anything on disk. "update" only touches the "proxies" and "proxy-groups"
 sections: every other setting in the local file, including manual edits, is
-left untouched.
+left untouched. If those two sections turn out to be identical to what is
+already in the file, nothing is written at all and mihomo is not restarted;
+otherwise the file is updated and mihomo is restarted so that the new servers
+take effect immediately. The last line of the output is a machine readable
+"RESULT: unchanged|updated|updated-restarted" marker.
 EOF
 }
 
@@ -547,6 +557,14 @@ replace_block() {
 	fi
 }
 
+# 归一化后的内容, 只用于比较, 不改写文件本身: 去掉行尾空白、空行与整行注释。
+# 订阅里常见的「更新时间」注释行每次都会有细微差别, 不剔除的话每天都会被判成
+# 「有变化」而白白重启一次代理, 而这些差异对 mihomo 来说没有任何意义。
+# 只剔除整行注释 (行首可选空白 + #), 不碰行内注释, 避免误伤值里含 # 的条目。
+normalize_file() {
+	sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*#/d' "$1"
+}
+
 # ---------------------------------------------------------------------------
 # 命令: import
 # ---------------------------------------------------------------------------
@@ -648,7 +666,7 @@ do_update() {
 	local name="$1" url="$2" from_record=0
 	local target before after cur stage
 	local dl norm flog newp newg m1 m2 chk rc hints reason
-	local have_p have_g
+	local have_p have_g n1 n2 note_p note_g
 
 	[ -n "$name" ] || die "缺少配置文件名"
 
@@ -681,7 +699,9 @@ do_update() {
 	m1="/tmp/mihomo-update.$$.1"
 	m2="/tmp/mihomo-update.$$.2"
 	chk="/tmp/mihomo-update.$$.check"
-	TMPFILES="$TMPFILES $dl $flog $newp $newg $m1 $m2 $chk"
+	n1="/tmp/mihomo-update.$$.cmp.new"
+	n2="/tmp/mihomo-update.$$.cmp.old"
+	TMPFILES="$TMPFILES $dl $flog $newp $newg $m1 $m2 $chk $n1 $n2"
 
 	before=$(wc -c < "$target" | tr -d ' ')
 
@@ -740,35 +760,61 @@ do_update() {
 		die "更新 $name 失败: 远程 proxies 段为空列表, 拒绝用它覆盖本地的服务器列表"
 	fi
 
-	echo "== 合并 (只替换这两段, 其余内容原样保留) =="
+	# 先静默算一遍合并结果, 与磁盘上的文件比较之后再决定要不要动它。
+	# 内容一致时连写盘都不做: 文件时间戳不变, 服务也就不会因为「配置文件被
+	# 改过」而被 procd 的 file 检查判成需要重启, 代理不会白闪一次。
 	cur="$target"
+	note_p=""
+	note_g=""
 
 	if [ "$have_p" = 1 ]; then
 		if block_exists "$cur" proxies; then
-			echo "proxies:       已用远程内容替换"
+			note_p="已用远程内容替换"
 		else
-			echo "proxies:       本地原本没有该段, 已追加到文件末尾"
+			note_p="本地原本没有该段, 已追加到文件末尾"
 			if grep -qE '^proxy-providers:' "$cur"; then
-				echo "               (注意: 本地使用了 proxy-providers, 追加内联 proxies 后两者会同时生效)"
+				note_p="$note_p
+               (注意: 本地使用了 proxy-providers, 追加内联 proxies 后两者会同时生效)"
 			fi
 		fi
 		replace_block "$cur" "$newp" proxies > "$m1" || die "更新 $name 失败: 处理 proxies 段时出错"
 		cur="$m1"
 	else
-		echo "proxies:       远程没有该段, 保持本地不变"
+		note_p="远程没有该段, 保持本地不变"
 	fi
 
 	if [ "$have_g" = 1 ]; then
 		if block_exists "$cur" proxy-groups; then
-			echo "proxy-groups:  已用远程内容替换"
+			note_g="已用远程内容替换"
 		else
-			echo "proxy-groups:  本地原本没有该段, 已追加到文件末尾"
+			note_g="本地原本没有该段, 已追加到文件末尾"
 		fi
 		replace_block "$cur" "$newg" proxy-groups > "$m2" || die "更新 $name 失败: 处理 proxy-groups 段时出错"
 		cur="$m2"
 	else
-		echo "proxy-groups:  远程没有该段, 保持本地不变"
+		note_g="远程没有该段, 保持本地不变"
 	fi
+
+	echo "== 对比 =="
+	normalize_file "$cur" > "$n1"
+	normalize_file "$target" > "$n2"
+
+	if cmp -s "$n1" "$n2"; then
+		echo "远程的 proxies / proxy-groups 与本地一致, 没有新内容。"
+		echo "未改动 $target, 也不会重启服务。"
+		echo
+		echo "RESULT: unchanged"
+
+		if [ "$from_record" = 0 ]; then
+			source_set "$name" "$url" \
+				&& echo "已记录本次使用的订阅链接, 下次可直接点「仅更新」无需再填写"
+		fi
+		return 0
+	fi
+
+	echo "有内容变化, 将替换下面这两段 (其余内容原样保留):"
+	echo "proxies:       $note_p"
+	echo "proxy-groups:  $note_g"
 	echo
 
 	echo "== 校验 (mihomo -t) =="
@@ -809,10 +855,36 @@ do_update() {
 		fi
 	fi
 
-	if [ "$target" = "$CONFFILE" ]; then
-		echo "该文件正是当前生效的配置, 重启 mihomo 服务后生效。"
+	if [ "$target" != "$CONFFILE" ]; then
+		echo "当前生效的配置是 $CONFFILE, 本次更新的不是它, 因此不重启服务。"
+		echo "RESULT: updated"
+		return 0
+	fi
+
+	# 只有更新的是当前生效的配置, 重启才有意义 —— 更新别的文件时重启服务只会
+	# 把正在工作的代理打断。服务没在运行时也不去拉它, 免得「更新订阅」顺手把
+	# 服务的运行状态改掉 (uci mihomo.main.enabled = 0 时 start_service 会直接
+	# 返回, 重启也不会真的拉起进程)。
+	if [ ! -x "$INITD" ]; then
+		echo "提示: 找不到 $INITD, 请手动重启 mihomo 让新配置生效。" >&2
+		echo "RESULT: updated"
+		return 0
+	fi
+
+	if ! "$INITD" running >/dev/null 2>&1; then
+		echo "mihomo 服务当前没有运行, 未执行重启 (下次启动时会使用新配置)。"
+		echo "RESULT: updated"
+		return 0
+	fi
+
+	echo "== 重启 =="
+	if "$INITD" restart; then
+		echo "已重启 mihomo 服务, 新配置已生效。"
+		echo "RESULT: updated-restarted"
 	else
-		echo "当前生效的配置是 $CONFFILE"
+		echo "错误: 配置已更新, 但 mihomo 服务重启失败 (详见上面的输出与系统日志)" >&2
+		echo "RESULT: restart-failed"
+		exit 1
 	fi
 }
 

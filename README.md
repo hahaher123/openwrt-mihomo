@@ -36,8 +36,8 @@ openwrt-mihomo/
 **「配置文件」** 管理 workdir 下的 `*.yaml` / `*.yml`：列出文件、单选其中一项作为运行配置、直接编辑其内容。
 
 - **远程导入**：填 clash/mihomo 订阅 URL，由包内 `/etc/mihomo/config.sh import` 完成——先下载到 `/tmp`，用 `mihomo -t` 校验通过后才安装到 `/etc/mihomo`；**下载失败或校验失败不会落盘，也不会覆盖同名文件**（需显式勾选「覆盖同名文件」）。文件名留空则按 URL 末段自动命名并补 `.yaml`
-- **仅更新服务器和代理组**：按订阅链接重新拉取，**只替换选中配置里的 `proxies`（服务器）与 `proxy-groups`（代理组）两段**，其余设置（`rules` / `dns` / `tun` 等）以及手动修改过的内容全部原样保留——适合「本地手工调过规则、只想刷新节点」的场景。流程为 下载 → 提取两段 → 合并 → `mihomo -t` 校验 → 通过才写回，任何一步失败都不改动原文件并给出具体原因（网络 / DNS 解析 / HTTP 状态 / 订阅格式 / 配置解析 / 校验不通过）。订阅链接在导入时记录于 `<workdir>/sources`（0600），更新时无需重填
-- **定时更新服务器和代理组**：把「仅更新」写成一条 cron 计划任务，频率可选每小时 / 每 6 小时 / 每 12 小时 / 每天 / 每周一，也可填任意 5 段 cron 表达式。计划任务只写在 `/etc/crontabs/root` 内由页面管理的标记块里，**你自己添加的其它计划任务不受影响**；每次执行的结果与失败原因写入系统日志（`logread`，标签 `mihomo-autoupdate`）。定时更新**不会**重启服务，也不会改动其它设置
+- **仅更新服务器和代理组**：按订阅链接重新拉取，**只替换选中配置里的 `proxies`（服务器）与 `proxy-groups`（代理组）两段**，其余设置（`rules` / `dns` / `tun` 等）以及手动修改过的内容全部原样保留——适合「本地手工调过规则、只想刷新节点」的场景。流程为 下载 → 提取两段 → 与本地对比 → `mihomo -t` 校验 → 通过才写回：**两段与本地一致时直接结束，既不写盘也不重启**（避免每天白白重启一次代理），只有内容确实有变化时才写入并重启服务（仅当更新的正是当前生效配置、且服务正在运行时），让新节点立即生效。任何一步失败都不改动原文件并给出具体原因（网络 / DNS 解析 / HTTP 状态 / 订阅格式 / 配置解析 / 校验不通过）。订阅链接在导入时记录于 `<workdir>/sources`（0600），更新时无需重填
+- **定时更新服务器和代理组**：把「仅更新」写成一条 cron 计划任务，频率可选每小时 / 每 6 小时 / 每 12 小时 / 每天 / 每周一，也可填任意 5 段 cron 表达式。计划任务只写在 `/etc/crontabs/root` 内由页面管理的标记块里，**你自己添加的其它计划任务不受影响**；每次执行的结果与失败原因写入系统日志（`logread`，标签 `mihomo-autoupdate`）。定时更新走与「仅更新」完全相同的流程，同样会先对比：**内容一致时什么都不做**，内容有变化才更新配置并重启服务；不会改动其它设置
 - **选择运行配置**：「设为当前配置」写 uci `mihomo.main.conffile`（与 `/etc/init.d/mihomo` 同源），「…并重启」写入后再重启服务；列表中用绿色标签标出当前生效文件
 - **编辑与保存**：提供「校验」/「保存」/「保存并重启」三个按钮。**保存与保存并重启都会先校验，校验不通过不会写入文件**；校验参数与服务启动一致（`mihomo -t -f <配置> -d <workdir>`），且在 `/tmp` 中进行，不写 flash；保存后文件权限 `0600`（配置含订阅凭据）
 - **结果提示**：所有操作的结论（校验 / 保存 / 重启 / 导入 / 更新 / 定时设置）都以页面顶部**醒目横幅**呈现（颜色区分成功 / 失败 / 警告）并附脚本原始输出，同时弹出通知
@@ -100,7 +100,7 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 
 发布由**手动触发**的 GitHub Actions 工作流完成，一次构建并发布两个包：打开 [Actions → Build and release Mihomo APK](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/build.yml)，点右上角 **Run workflow**（分支选 `main`）；构建完成后自动打 tag 并发布 [Release](https://github.com/hahaher123/openwrt-mihomo/releases)，产物含 x86_64 与 aarch64_generic 两个架构。
 
-**tag 规则**：`v<mihomo 版本>-r<包修订>-luci<LuCI 版本>-r<包修订>`，当前代码对应 **`v1.19.31-r1-luci1.0.2-r1`**。两个包**任意一个版本变化都会产生新 tag**，因此 Release 始终与代码一致；同一版本重复运行只会覆盖更新已有 Release 的资产，不会出现「看着最新、其实是旧代码」的成品包。
+**tag 规则**：`v<mihomo 版本>-r<包修订>-luci<LuCI 版本>-r<包修订>`，当前代码对应 **`v1.19.31-r1-luci1.0.3-r1`**。两个包**任意一个版本变化都会产生新 tag**，因此 Release 始终与代码一致；同一版本重复运行只会覆盖更新已有 Release 的资产，不会出现「看着最新、其实是旧代码」的成品包。
 
 **版本号约定**：修 bug / 调整已安装文件只升 `PKG_RELEASE`；新增功能或跟进上游版本才升 `PKG_VERSION`（并把对应的 `PKG_RELEASE` 重置为 `1`）；只改文档或 CI 不动版本号。
 
@@ -110,7 +110,7 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 安装示例（x86_64；APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖）：
 
 ```
-$ apk add --allow-untrusted mihomo-1.19.31-r1_x86_64.apk luci-app-mihomo-1.0.2-r1.apk
+$ apk add --allow-untrusted mihomo-1.19.31-r1_x86_64.apk luci-app-mihomo-1.0.3-r1.apk
 ```
 
 也可以按上一节在 OpenWrt 25.12.2 SDK 中自行编译（一条命令同时产出两个 APK）。上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。
