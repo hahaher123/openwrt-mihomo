@@ -11,7 +11,9 @@
 				"/etc/init.d/mihomo": [ "exec" ],
 				"/etc/mihomo": [ "list" ],
 				"/etc/mihomo/*": [ "read" ],
+				"/etc/mihomo/sources": [ "read" ],
 				"/etc/mihomo/config.sh": [ "exec" ],
+				"/etc/mihomo/autoupdate.sh": [ "exec" ],
 				"/etc/mihomo/tproxy.sh": [ "read" ],
 				"/etc/mihomo/clash.nft": [ "read" ]
 			},
@@ -21,7 +23,9 @@
 			"file": {
 				"/etc/init.d/mihomo": [ "exec" ],
 				"/etc/mihomo/*": [ "write" ],
+				"/etc/mihomo/sources": [ "write" ],
 				"/etc/mihomo/config.sh": [ "exec" ],
+				"/etc/mihomo/autoupdate.sh": [ "exec" ],
 				"/etc/mihomo/tproxy.sh": [ "write" ],
 				"/etc/mihomo/clash.nft": [ "write" ],
 				"/tmp/mihomo-config-check.yaml": [ "write" ]

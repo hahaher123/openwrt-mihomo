@@ -11,8 +11,18 @@
 //   (写入 uci mihomo.main.conffile, 与 /etc/init.d/mihomo 读的是同一项)
 // - 从远程 URL 导入 clash/mihomo 订阅, 先校验再落盘
 //   (由 /etc/mihomo/config.sh import 完成, 下载到 /tmp 校验通过后才安装)
+// - 仅更新服务器和代理组: 按订阅链接重新拉取, 只替换选中配置里的
+//   proxies / proxy-groups 两段, 其余设置与手动修改都保持不动
+//   (由 /etc/mihomo/config.sh update 完成)
 // - 直接编辑选中的配置文件: 校验 / 保存 / 保存并重启
 //   保存与保存并重启都会先校验, 校验不通过不写文件
+// - 定时更新: 把「仅更新」写成一条 cron 计划任务 (由 /etc/mihomo/autoupdate.sh
+//   的 set/apply 写 /etc/crontabs/root, 只动它自己那块带标记的内容), 设置存在
+//   uci mihomo.autoupdate (enabled/target/schedule/url); 本页面只读 uci,
+//   写入交给脚本 (避开 ubus 提交带来的服务 reload, 详见 autoupdate.sh)
+//
+// 订阅链接记录在 <workdir>/sources ("<name> <url>" 每行一条), 由 config.sh
+// 在 import/update 时写入, 本页面只读取它来预填「仅更新」的链接输入框。
 //
 // 校验统一用上游自带的 "mihomo -t", 参数与服务启动一致 (-f <配置> -d <workdir>)。
 // mihomo 按 -d 解析配置内的相对路径 (constant/path.go: Resolve 用 HomeDir),
@@ -21,6 +31,7 @@
 
 var MIHOMO_BIN = '/usr/bin/mihomo';
 var HELPER = '/etc/mihomo/config.sh';
+var AUTOUPDATE = '/etc/mihomo/autoupdate.sh';
 var CHECK_FILE = '/tmp/mihomo-config-check.yaml';
 
 var DEFAULT_WORKDIR = '/etc/mihomo';
@@ -36,6 +47,18 @@ var KIND = {
 	warn: [ '#fff8e1', '#ef6c00', '#e65100', '▲' ],
 	info: [ '#e8f0fe', '#1565c0', '#0d47a1', '➜' ]
 };
+
+// 定时更新的执行时间选项: [cron 表达式, 说明]。最后一项是自定义。
+var AUTO_DEFAULT_SCHEDULE = '0 4 * * *';
+
+var AUTO_SCHEDULES = [
+	[ '0 * * * *',    '每小时 (整点)' ],
+	[ '0 */6 * * *',  '每 6 小时' ],
+	[ '0 */12 * * *', '每 12 小时' ],
+	[ '0 4 * * *',    '每天 04:00' ],
+	[ '0 4 * * 1',    '每周一 04:00' ],
+	[ 'custom',       '自定义 cron 表达式' ]
+];
 
 function fmtSize(n) {
 	if (n == null || isNaN(n))
@@ -116,6 +139,66 @@ return view.extend({
 		return _('\n注意: uci mihomo.main.enabled = 0, 服务处于禁用状态, 重启不会真正拉起进程。请先在「运行状态」页开启。');
 	},
 
+	// ---------------- 订阅链接记录 ----------------
+
+	sourcePath: function() {
+		return this.cfg().workdir + '/sources';
+	},
+
+	// 解析 <workdir>/sources: 每行 "<配置文件名> <URL>"
+	parseSources: function(text) {
+		var map = {};
+		var lines = String(text || '').split('\n');
+
+		for (var i = 0; i < lines.length; i++) {
+			var m = lines[i].match(/^(\S+)[ \t]+(\S.*)$/);
+			if (m)
+				map[m[1]] = m[2].replace(/[ \t]+$/, '');
+		}
+
+		return map;
+	},
+
+	loadSources: function() {
+		var self = this;
+
+		return L.resolveDefault(fs.read(this.sourcePath()), '').then(function(text) {
+			self.sources = self.parseSources(text);
+			return self.sources;
+		});
+	},
+
+	reloadSource: function() {
+		var self = this;
+
+		return this.loadSources().then(function() {
+			self.syncSourceField();
+		});
+	},
+
+	// 把选中项记录的订阅链接同步到「仅更新」的输入框。
+	// replace 为真时无条件覆盖输入框 (切换选中项时必须覆盖, 否则会残留上一项的
+	// 链接而造成更新到错误的目标)。
+	syncSourceField: function(replace) {
+		if (!this.updUrl)
+			return;
+
+		var name = this.selected;
+		var url = name ? ((this.sources || {})[name] || '') : '';
+
+		if (replace || !this.updUrl.value)
+			this.updUrl.value = url;
+
+		if (this.updInfo) {
+			if (!name)
+				this.updInfo.textContent = _('尚未选择配置文件。');
+			else if (url)
+				this.updInfo.textContent = _('选中 %1$s, 已记录的订阅链接: %2$s').format(name, url);
+			else
+				this.updInfo.textContent = _('选中 %1$s, 但没有记录订阅链接, 请在上方输入框里手动填写。').format(name);
+		}
+	},
+
 	// ---------------- 校验 / 重启 ----------------
 
 	// 用 mihomo -t 校验一段配置内容, 返回 { code, stdout, stderr }。
@@ -170,6 +253,9 @@ return view.extend({
 
 		while (this.listBox.firstChild)
 			this.listBox.removeChild(this.listBox.firstChild);
+
+		// 定时更新的目标下拉框与这份清单同源, 一起刷新
+		this.fillAutoTargets(entries);
 
 		if (listError) {
 			this.listBox.appendChild(E('div', {
@@ -249,6 +335,9 @@ return view.extend({
 		this.selected = name;
 		this.editPath.textContent = this.pathOf(name);
 
+		// 切换目标时必须覆盖链接输入框, 否则会把上一项的链接用到新目标上
+		this.syncSourceField(true);
+
 		return fs.read(this.pathOf(name)).then(function(content) {
 			self.ta.value = content || '';
 		}, function(e) {
@@ -296,6 +385,92 @@ return view.extend({
 		}, function(e) {
 			// 权限不足等 RPC 级失败走这里, 此时没有 code 可看
 			self.setResult('err', _('导入无法执行'), String(e.message || e));
+		});
+	},
+
+	// ---------------- 动作: 仅更新服务器和代理组 ----------------
+
+	handleUpdateCfg: function(ev) {
+		return this.doUpdate(false);
+	},
+
+	handleUpdateCfgRestart: function(ev) {
+		return this.doUpdate(true);
+	},
+
+	// 只刷新 proxies / proxy-groups 两段, 其余内容 (rules / dns / tun 等以及
+	// 手动修改) 由脚本原样保留。下载、提取、合并、校验与写入全在服务端完成。
+	doUpdate: function(restart) {
+		var self = this;
+		var name = this.selected;
+
+		if (!name) {
+			this.setResult('warn', _('请先在上面的列表中选择一个配置文件'), '');
+			return Promise.resolve();
+		}
+
+		var path = this.pathOf(name);
+		var url = String(this.updUrl.value || '').trim();
+		var recorded = (this.sources || {})[name] || '';
+
+		if (!url && !recorded) {
+			this.setResult('warn', _('缺少订阅链接'),
+				_('配置 %s 没有记录订阅链接, 请在上方输入框里填写后重试。').format(name));
+			return Promise.resolve();
+		}
+
+		var args = [ 'update', name ];
+		if (url)
+			args.push(url);
+
+		// 更新只基于磁盘上的文件: 编辑区里未保存的修改不会被纳入, 更新成功后编辑区
+		// 又会被刷新覆盖, 所以先拦下来让用户决定。
+		return fs.read(path).then(function(disk) {
+			if (String(disk == null ? '' : disk) !== String(self.ta.value || '')) {
+				self.setResult('warn', _('请先保存或放弃编辑区的修改'),
+					_('编辑区内容与磁盘上的 %s 不一致。').format(path) + '\n' +
+					_('「仅更新」只基于磁盘上的文件内容, 未保存的修改不会被纳入, 更新成功后编辑区也会被刷新。'));
+				return;
+			}
+
+			self.setResult('info', _('正在更新…'), _('目标: %s').format(path), true);
+
+			return fs.exec(HELPER, args).then(function(res) {
+				var ok = (res && res.code == 0);
+				var out = joinOutput(res) || _('(无输出)');
+
+				if (!ok) {
+					self.setResult('err', _('更新失败 (退出码 %s)').format(res ? res.code : '?'), out);
+					return;
+				}
+
+				// 文件已经变了: 刷新列表、订阅链接记录与编辑区
+				return self.refreshList().then(function() {
+					return self.reloadSource();
+				}).then(function() {
+					return self.handlePick(name);
+				}).then(function() {
+					if (!restart) {
+						self.setResult('ok', _('已更新服务器和代理组'), out + self.restartNote());
+						return;
+					}
+
+					self.setResult('info', _('更新成功, 正在重启服务…'), out, true);
+
+					return self.restartService().then(function(r) {
+						var rok = (r && r.code == 0);
+
+						self.setResult(rok ? 'ok' : 'err',
+							rok ? _('已更新服务器和代理组, 并重启服务') : _('已更新, 但服务重启失败 (退出码 %s)').format(r ? r.code : '?'),
+							out + '\n\n' + (joinOutput(r) || _('(无输出)')) + self.restartNote());
+					});
+				});
+			}, function(e) {
+				// 权限不足等 RPC 级失败走这里, 此时没有 code 可看
+				self.setResult('err', _('更新无法执行'), String(e.message || e));
+			});
+		}, function(e) {
+			self.setResult('err', _('读取 %s 失败').format(path), String(e.message || e));
 		});
 	},
 
@@ -432,12 +607,163 @@ return view.extend({
 		return this.doSave(true);
 	},
 
+	// ---------------- 定时更新 (uci mihomo.autoupdate + autoupdate.sh) ----------------
+
+	// uci 里的定时更新设置。autoupdate.sh 用 config_get 读同名的四项,
+	// 所以这里的键名必须与脚本一致 (enabled / target / schedule / url)。
+	// 只读不写: 写由 autoupdate.sh set 用命令行 uci 完成 (见该脚本的说明)。
+	autoSettings: function() {
+		return {
+			enabled:  uci.get_first('mihomo', 'autoupdate', 'enabled') == '1',
+			target:   uci.get_first('mihomo', 'autoupdate', 'target') || '',
+			schedule: uci.get_first('mihomo', 'autoupdate', 'schedule') || AUTO_DEFAULT_SCHEDULE,
+			url:      uci.get_first('mihomo', 'autoupdate', 'url') || ''
+		};
+	},
+
+	// 与 autoupdate.sh 的 validate_schedule 保持一致, 先在页面上拦一次
+	validSchedule: function(s) {
+		if (!s || !/^[0-9*/, -]+$/.test(s))
+			return false;
+
+		return String(s).trim().split(/\s+/).length == 5;
+	},
+
+	// 目标下拉框与配置文件列表同源, 清单变化时同步刷新
+	fillAutoTargets: function(entries) {
+		var names = this.sortedNames(entries);
+		var want = this.autoSettings().target;
+
+		if (!this.autoTarget)
+			return;
+
+		while (this.autoTarget.firstChild)
+			this.autoTarget.removeChild(this.autoTarget.firstChild);
+
+		this.autoTarget.appendChild(E('option', { 'value': '' }, [ _('（请选择配置文件）') ]));
+
+		for (var i = 0; i < names.length; i++) {
+			this.autoTarget.appendChild(E('option', {
+				'value': names[i].name,
+				'selected': (names[i].name == want) ? '' : null
+			}, [ names[i].name ]));
+		}
+	},
+
+	// 用 uci 里的值初始化表单 (在目标下拉框填充之后调用)
+	applyAutoSettings: function() {
+		var s = this.autoSettings();
+		var known = false;
+
+		this.autoEnabled.checked = s.enabled;
+		this.autoTarget.value = s.target;
+		this.autoUrl.value = s.url;
+
+		for (var i = 0; i < AUTO_SCHEDULES.length; i++) {
+			if (AUTO_SCHEDULES[i][0] == s.schedule) {
+				this.autoFreq.value = s.schedule;
+				known = true;
+				break;
+			}
+		}
+
+		if (!known) {
+			this.autoFreq.value = 'custom';
+			this.autoCron.value = s.schedule;
+		}
+
+		this.autoScheduleSync();
+	},
+
+	// 「更新频率」选到自定义时展开 cron 输入框, 否则把选中的表达式写进去
+	autoScheduleSync: function() {
+		var custom = (this.autoFreq.value == 'custom');
+
+		this.autoCron.style.display = custom ? 'inline-block' : 'none';
+
+		if (!custom)
+			this.autoCron.value = this.autoFreq.value;
+
+		return Promise.resolve();
+	},
+
+	handleAutoFreq: function(ev) {
+		return this.autoScheduleSync();
+	},
+
+	refreshAutoStatus: function() {
+		var self = this;
+
+		return fs.exec(AUTOUPDATE, [ 'status' ]).then(function(res) {
+			if (self.autoStatusPre)
+				self.autoStatusPre.textContent = joinOutput(res) || _('(无输出)');
+		}, function(e) {
+			if (self.autoStatusPre)
+				self.autoStatusPre.textContent = String(e.message || e);
+		});
+	},
+
+	handleAutoStatus: function(ev) {
+		return this.refreshAutoStatus();
+	},
+
+	handleAutoSave: function(ev) {
+		var self = this;
+		var enabled = !!this.autoEnabled.checked;
+		var target = String(this.autoTarget.value || '');
+		var freq = String(this.autoFreq.value || '');
+		var schedule = (freq == 'custom') ? String(this.autoCron.value || '').trim() : freq;
+		var url = String(this.autoUrl.value || '').trim();
+
+		if (enabled) {
+			if (!target) {
+				this.setResult('warn', _('请选择要定时更新的配置文件'), '');
+				return Promise.resolve();
+			}
+
+			if (!this.validSchedule(schedule)) {
+				this.setResult('warn', _('执行时间不合法'),
+					_('需要 5 段 (分 时 日 月 周), 只能使用 0-9 * / , - 与空格, 例如 %s。当前值: %s')
+						.format(AUTO_DEFAULT_SCHEDULE, schedule || '(空)'));
+				return Promise.resolve();
+			}
+		}
+
+		// 写 uci 与落计划任务都由 autoupdate.sh 完成。刻意不走 rpcd 的 uci.apply:
+		// 那会发 config.change 事件, 使 mihomo 执行 reload (= stop + start),
+		// 只改一个定时设置不该重启代理。
+		this.setResult('info', _('正在保存定时设置…'), '', true);
+
+		return fs.exec(AUTOUPDATE, [ 'set', enabled ? '1' : '0', target, schedule, url ])
+			.then(function(res) {
+				var ok = (res && res.code == 0);
+				var out = joinOutput(res) || _('(无输出)');
+
+				self.setResult(ok ? 'ok' : 'err',
+					ok ? (enabled ? _('定时更新已启用') : _('定时更新已关闭'))
+					   : _('定时设置未保存 (退出码 %s)').format(res ? res.code : '?'),
+					out);
+
+				return self.refreshAutoStatus();
+			}, function(e) {
+				self.setResult('err', _('保存定时设置失败'), String(e.message || e));
+			});
+	},
+
+	handleAutoRemove: function(ev) {
+		this.autoEnabled.checked = false;
+
+		return this.handleAutoSave(ev);
+	},
+
 	// ---------------- 生命周期 ----------------
 
 	load: function() {
 		var self = this;
 
 		return uci.load('mihomo').then(function() {
+			return self.loadSources();
+		}).then(function() {
 			var c = self.cfg();
 
 			return fs.list(c.workdir).then(function(entries) {
@@ -508,6 +834,47 @@ return view.extend({
 
 		this.forceBox = E('input', { 'type': 'checkbox' }, []);
 
+		// ---- 仅更新表单 ----
+		this.updInfo = E('div', {
+			'style': 'margin:10px 0; padding:8px 10px; border-left:4px solid #1565c0; background:#e8f0fe; color:#0d47a1; border-radius:6px; font-size:0.92em;'
+		}, [ '' ]);
+
+		this.updUrl = E('input', {
+			'type': 'text',
+			'placeholder': _('留空则使用该配置记录的订阅链接'),
+			'style': 'width:100%; padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; font-family:monospace;'
+		}, []);
+
+		// ---- 定时更新表单 ----
+		this.autoEnabled = E('input', { 'type': 'checkbox' }, []);
+
+		this.autoTarget = E('select', {
+			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff; font-family:monospace; min-width:180px;'
+		}, []);
+
+		this.autoFreq = E('select', {
+			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff;',
+			'change': ui.createHandlerFn(self, 'handleAutoFreq')
+		}, AUTO_SCHEDULES.map(function(item) {
+			return E('option', { 'value': item[0] }, [ _(item[1]) ]);
+		}));
+
+		this.autoCron = E('input', {
+			'type': 'text',
+			'placeholder': AUTO_DEFAULT_SCHEDULE,
+			'style': 'display:none; width:200px; padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; font-family:monospace;'
+		}, []);
+
+		this.autoUrl = E('input', {
+			'type': 'text',
+			'placeholder': _('留空则使用该配置记录的订阅链接'),
+			'style': 'width:100%; padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; font-family:monospace;'
+		}, []);
+
+		this.autoStatusPre = E('pre', {
+			'style': 'margin:10px 0 0 0; padding:10px; max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:6px; font-size:0.9em; color:#333;'
+		}, [ _('尚未读取定时更新状态') ]);
+
 		var btn = function(label, handler, cls) {
 			return E('button', {
 				'class': 'btn cbi-button ' + (cls || 'cbi-button-apply'),
@@ -557,6 +924,46 @@ return view.extend({
 				btn(_('设为当前配置并重启'), 'handleSetConfigRestart')
 			]),
 
+			E('h3', {}, [ _('仅更新服务器和代理组') ]),
+			E('div', { 'class': 'cbi-map-descr' }, [
+				_('按订阅链接重新拉取, 只替换选中配置里的 proxies (服务器) 与 proxy-groups (代理组) 两段; 其余设置 (rules / dns / tun 等) 以及手动修改过的内容都保持不动。'),
+				E('br'),
+				_('流程: 下载 → 提取两段 → 合并 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。')
+			]),
+			this.updInfo,
+			E('div', { 'style': 'margin:10px 0 6px 0;' }, [ this.updUrl ]),
+			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px;' }, [
+				btn(_('仅更新'), 'handleUpdateCfg', 'cbi-button'),
+				btn(_('仅更新并重启'), 'handleUpdateCfgRestart')
+			]),
+
+			E('h3', {}, [ _('定时更新服务器和代理组') ]),
+			E('div', { 'class': 'cbi-map-descr' }, [
+				_('启用后会写入一条计划任务 (cron), 按设定的频率对选中的配置文件执行与「仅更新」完全相同的流程: 下载订阅 → 只替换 proxies / proxy-groups 两段 → mihomo -t 校验 → 通过才写回文件。'),
+				E('br'),
+				_('更新不会重启服务, 也不会改动其它设置; 每次结果与失败原因写入系统日志 (logread, 标签 mihomo-autoupdate)。'),
+				E('br'),
+				_('计划任务写在 /etc/crontabs/root 里由本页面管理的标记块中, 你自己添加的其它计划任务不受影响。')
+			]),
+			E('div', { 'style': 'display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:10px 0;' }, [
+				E('label', { 'style': 'display:flex; align-items:center; gap:6px; color:#555;' }, [
+					this.autoEnabled, _('启用定时更新')
+				]),
+				E('label', { 'style': 'display:flex; align-items:center; gap:6px; color:#555;' }, [
+					_('目标配置'), this.autoTarget
+				]),
+				E('label', { 'style': 'display:flex; align-items:center; gap:6px; color:#555;' }, [
+					_('更新频率'), this.autoFreq, this.autoCron
+				])
+			]),
+			E('div', { 'style': 'margin:10px 0 6px 0;' }, [ this.autoUrl ]),
+			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap;' }, [
+				btn(_('保存定时设置'), 'handleAutoSave'),
+				btn(_('关闭定时更新'), 'handleAutoRemove', 'cbi-button'),
+				btn(_('刷新状态'), 'handleAutoStatus', 'cbi-button')
+			]),
+			this.autoStatusPre,
+
 			E('h3', {}, [ _('编辑选中的配置文件') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [ _('正在编辑: '), this.editPath ]),
 			this.ta,
@@ -568,6 +975,9 @@ return view.extend({
 		]);
 
 		this.buildList(data.entries, data.error);
+		this.syncSourceField(true);
+		this.applyAutoSettings();
+		this.refreshAutoStatus();
 
 		if (data.error)
 			this.setResult('err', _('读取目录 %s 失败').format(c.workdir), data.error, true);

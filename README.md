@@ -10,12 +10,13 @@ openwrt-mihomo/
 ├── mihomo/            # mihomo 包：/usr/bin/mihomo、/etc/init.d/mihomo、/etc/config/mihomo
 │                      #             /etc/mihomo/{tproxy.sh,clash.nft}
 └── luci-app-mihomo/   # LuCI 管理界面（依赖 mihomo 包，编译时自动先编译 mihomo）
-                       # 另随装 /etc/mihomo/config.sh（「配置文件」页的远程导入辅助脚本）
+                       # 另随装 /etc/mihomo/config.sh    （「配置文件」页的导入/更新辅助脚本）
+                       #       /etc/mihomo/autoupdate.sh（定时更新的计划任务管理脚本）
 ```
 
 - 面向 OpenWrt 25 的原生 mihomo 构建（APK 包格式），自带 procd init 脚本与 uci 配置
 - **内置地理数据库**：打包时自动下载 [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip) 的 `Country.mmdb` 与 [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat) 的 `geoip.dat`、`geosite.dat`（经 jsdelivr CDN），安装时释放至 `/etc/mihomo`，无需首次运行时在线下载
-- `luci-app-mihomo` 通过 `LUCI_DEPENDS:=+luci-base +mihomo` 声明对 mihomo 的硬依赖
+- `luci-app-mihomo` 通过 `LUCI_DEPENDS:=+luci-base +mihomo +curl` 声明依赖；`curl` 是下载订阅的首选工具（自带 TLS 与 CA），缺失时会依次退回 `wget`、`uclient-fetch`
 
 ## 前置要求
 
@@ -35,14 +36,20 @@ openwrt-mihomo/
 **「配置文件」** 管理 workdir 下的 `*.yaml` / `*.yml`：列出文件、单选其中一项作为运行配置、直接编辑其内容。
 
 - **远程导入**：填 clash/mihomo 订阅 URL，由包内 `/etc/mihomo/config.sh import` 完成——先下载到 `/tmp`，用 `mihomo -t` 校验通过后才安装到 `/etc/mihomo`；**下载失败或校验失败不会落盘，也不会覆盖同名文件**（需显式勾选「覆盖同名文件」）。文件名留空则按 URL 末段自动命名并补 `.yaml`
+- **仅更新服务器和代理组**：按订阅链接重新拉取，**只替换选中配置里的 `proxies`（服务器）与 `proxy-groups`（代理组）两段**，其余设置（`rules` / `dns` / `tun` 等）以及手动修改过的内容全部原样保留——适合「本地手工调过规则、只想刷新节点」的场景。流程为 下载 → 提取两段 → 合并 → `mihomo -t` 校验 → 通过才写回，任何一步失败都不改动原文件并给出具体原因（网络 / DNS 解析 / HTTP 状态 / 订阅格式 / 配置解析 / 校验不通过）。订阅链接在导入时记录于 `<workdir>/sources`（0600），更新时无需重填
+- **定时更新服务器和代理组**：把「仅更新」写成一条 cron 计划任务，频率可选每小时 / 每 6 小时 / 每 12 小时 / 每天 / 每周一，也可填任意 5 段 cron 表达式。计划任务只写在 `/etc/crontabs/root` 内由页面管理的标记块里，**你自己添加的其它计划任务不受影响**；每次执行的结果与失败原因写入系统日志（`logread`，标签 `mihomo-autoupdate`）。定时更新**不会**重启服务，也不会改动其它设置
 - **选择运行配置**：「设为当前配置」写 uci `mihomo.main.conffile`（与 `/etc/init.d/mihomo` 同源），「…并重启」写入后再重启服务；列表中用绿色标签标出当前生效文件
 - **编辑与保存**：提供「校验」/「保存」/「保存并重启」三个按钮。**保存与保存并重启都会先校验，校验不通过不会写入文件**；校验参数与服务启动一致（`mihomo -t -f <配置> -d <workdir>`），且在 `/tmp` 中进行，不写 flash；保存后文件权限 `0600`（配置含订阅凭据）
-- **结果提示**：所有操作的结论（校验 / 保存 / 重启 / 导入）都以页面顶部**醒目横幅**呈现（颜色区分成功 / 失败 / 警告）并附 mihomo 原始输出，同时弹出通知
+- **结果提示**：所有操作的结论（校验 / 保存 / 重启 / 导入 / 更新 / 定时设置）都以页面顶部**醒目横幅**呈现（颜色区分成功 / 失败 / 警告）并附脚本原始输出，同时弹出通知
 
 **「后台管理」** 内嵌 mihomo 外部控制器的 Web 管理界面（metacubexd / yacd 等），默认 `http://<路由器地址>:9090/ui`（可在「运行参数」页修改），提供「在新窗口打开」与「重新加载」。使用前需在 mihomo 配置文件中启用 `external-controller`（如 `0.0.0.0:9090`）与 `external-ui`（如 `ui`），并把仪表盘文件放入对应目录。
 
 > [!NOTE]
-> 远程导入依赖路由器能直连订阅地址；若订阅地址需经代理访问，请先配置好网络出口。
+> 远程导入 / 更新依赖路由器能直连订阅地址；若订阅地址需经代理访问，请先配置好网络出口。
+>
+> **下载**：优先用 `curl`（连接超时 15s / 整体超时 60s），最多重试 3 次，每次等待翻倍（5s → 10s → 20s，上限 30s）；5xx / 408 / 429 与超时、断连会重试，其余 4xx 与证书错误直接失败（重试也不会好）。失败原因会被归纳成一句中文（域名解析失败 / 网络连接失败 / 连接超时 / HTTP 4xx·5xx / TLS 证书错误）。
+>
+> **订阅格式**：同一份订阅可能不是明文 YAML——`gzip` 压缩与 `base64` 编码会被自动识别并解码；若链接返回的是网页（登录页/错误页）或 v2ray 那种 `ss:// vmess://` 节点链接列表，会直接给出可读原因（后者需改用机场的 Clash 订阅地址，常见做法是在链接后加 `&flag=clash`），而不是抛出难懂的 YAML 报错。
 
 ## 透明代理配置（nft REDIRECT + TPROXY 混合模式）
 
@@ -93,7 +100,9 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 
 发布由**手动触发**的 GitHub Actions 工作流完成，一次构建并发布两个包：打开 [Actions → Build and release Mihomo APK](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/build.yml)，点右上角 **Run workflow**（分支选 `main`）；构建完成后自动打 tag 并发布 [Release](https://github.com/hahaher123/openwrt-mihomo/releases)，产物含 x86_64 与 aarch64_generic 两个架构。
 
-**tag 规则**：`v<mihomo 版本>-r<包修订>-luci<LuCI 版本>-r<包修订>`，当前最新 Release 为 **`v1.19.31-r1-luci1.0.1-r6`**。两个包**任意一个版本变化都会产生新 tag**，因此 Release 始终与代码一致；同一版本重复运行只会覆盖更新已有 Release 的资产，不会出现「看着最新、其实是旧代码」的成品包。
+**tag 规则**：`v<mihomo 版本>-r<包修订>-luci<LuCI 版本>-r<包修订>`，当前代码对应 **`v1.19.31-r1-luci1.0.2-r1`**。两个包**任意一个版本变化都会产生新 tag**，因此 Release 始终与代码一致；同一版本重复运行只会覆盖更新已有 Release 的资产，不会出现「看着最新、其实是旧代码」的成品包。
+
+**版本号约定**：修 bug / 调整已安装文件只升 `PKG_RELEASE`；新增功能或跟进上游版本才升 `PKG_VERSION`（并把对应的 `PKG_RELEASE` 重置为 `1`）；只改文档或 CI 不动版本号。
 
 > [!IMPORTANT]
 > **配套声明**：`luci-app-mihomo` 是为本项目打包的 mihomo 定制的——界面上的每个开关都直接操作本项目的 uci 配置（`/etc/config/mihomo`）、init.d 命令（含 `tproxystatus`）与 `/etc/mihomo/tproxy.sh`、`/etc/mihomo/clash.nft`。请与**同一 Release 内**的 mihomo 配套安装；若使用其他来源或其他版本的 mihomo，界面需自行适配。本项目也**不会自动跟随** mihomo 上游新版本，升级 mihomo 后需手动适配 LuCI 再重新发版。
@@ -101,7 +110,7 @@ make package/luci-app-mihomo/compile V=s   # 会自动先编译 mihomo
 安装示例（x86_64；APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖）：
 
 ```
-$ apk add --allow-untrusted mihomo-1.19.31-r1_x86_64.apk luci-app-mihomo-1.0.1-r6.apk
+$ apk add --allow-untrusted mihomo-1.19.31-r1_x86_64.apk luci-app-mihomo-1.0.2-r1.apk
 ```
 
 也可以按上一节在 OpenWrt 25.12.2 SDK 中自行编译（一条命令同时产出两个 APK）。上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。
