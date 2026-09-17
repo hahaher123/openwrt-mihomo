@@ -23,6 +23,32 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Check exec bits of luci package scripts
+        run: |
+          # luci.mk 用 `cp -pR` 把 luci-app-mihomo/root/ 原样搬进包，不走
+          # $(INSTALL_BIN)，所以包内脚本的权限位完全由 git 索引里的 mode 决定：
+          # 索引记成 100644 时，包能正常安装、脚本却不可执行（页面调用直接失败），
+          # 属于静默失败。Windows 上尤其容易踩 —— core.filemode=false，NTFS 也没有
+          # exec 位，新建的 root/ 下脚本默认被记成 100644。
+          # 修复：git update-index --add --chmod=+x <path>
+          fail=0
+          while IFS=$'\t' read -r meta path; do
+            case "$path" in
+              luci-app-mihomo/root/*) ;;
+              *) continue ;;
+            esac
+            mode=${meta%% *}
+            if [ "$(head -c 2 "$path" 2>/dev/null)" = '#!' ] && [ "$mode" != "100755" ]; then
+              echo "::error file=${path}::包内脚本的索引模式是 ${mode}，应为 100755"
+              fail=1
+            fi
+          done < <(git ls-files --stage)
+          if [ "$fail" != 0 ]; then
+            echo "修复方式: git update-index --add --chmod=+x <path>"
+            exit 1
+          fi
+          echo "OK: luci-app-mihomo/root/ 下的脚本索引模式均为 100755"
+
       - name: Read package versions
         run: |
           MIHOMO_VER=$(grep -m1 '^PKG_VERSION:=' mihomo/Makefile | cut -d= -f2 | tr -d ' ')
