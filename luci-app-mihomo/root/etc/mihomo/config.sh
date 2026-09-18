@@ -38,6 +38,13 @@ RETRIES="3"
 RETRY_WAIT="5"
 RETRY_WAIT_MAX="30"
 
+# 下载时使用的 User-Agent。订阅面板普遍按 UA 决定返回什么: 只认 clash 系
+# 客户端的 UA, 不认识的 UA (curl/wget 的默认值、浏览器 UA) 一律 404, 即使
+# 链接本身完全有效。实测 (cdn.weatherinformations.com): clash.meta -> 200,
+# curl 默认 UA -> 404。所以这里必须显式带一个 clash 系 UA; 用 mihomo 的
+# 上游名而不是带版本号的写法, 免得随版本漂移。
+USER_AGENT="clash.meta"
+
 # A top level key line, used to find where a top level block ends. Sub items of
 # a block are either indented or start with "- " (both styles are common in
 # clash profiles), so "the next top level key" is the only reliable end marker.
@@ -205,11 +212,14 @@ fetch_once() {
 
 	case "$tool" in
 		curl)
-			curl -fsSL -sS --connect-timeout "$CONNECT_TIMEOUT" \
+			curl -fsSL -sS -A "$USER_AGENT" --connect-timeout "$CONNECT_TIMEOUT" \
 				--max-time "$TIMEOUT" -o "$out" "$url" >"$log" 2>&1 ;;
 		wget)
-			wget -T "$TIMEOUT" -O "$out" "$url" >"$log" 2>&1 ;;
+			# -U 在 busybox wget 与 GNU wget 上都是 user-agent
+			wget -T "$TIMEOUT" -U "$USER_AGENT" -O "$out" "$url" >"$log" 2>&1 ;;
 		*)
+			# uclient-fetch 没有自定义 UA 的选项, 发的是它自己的默认 UA;
+			# 只认 clash 系 UA 的面板在这种工具下拿不到订阅, 只能换 curl。
 			uclient-fetch -T "$TIMEOUT" -O "$out" "$url" >"$log" 2>&1 ;;
 	esac
 }
