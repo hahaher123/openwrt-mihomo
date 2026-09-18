@@ -887,7 +887,10 @@ return view.extend({
 				_('校验使用上游自带的 mihomo -t, 参数与服务启动一致; 保存与保存并重启都会先校验, 校验不通过不会写入文件。')
 			]),
 
-			(c.workdir == ACL_WORKDIR) ? '' : E('div', {
+			// 注意: E([...]) 的数组项必须是节点, 不能塞 ''/null 等非节点值 ——
+			// dom.create 会对它们走 createElement 从而抛 InvalidCharacterError,
+			// 所以 "无提示" 的分支用空文档片段占位。
+			(c.workdir == ACL_WORKDIR) ? E([]) : E('div', {
 				'style': 'margin:10px 0; padding:9px 12px; border-left:4px solid #ef6c00; background:#fff8e1; color:#e65100; border-radius:6px;'
 			}, [ _('注意: workdir 已被改为 %s, 而本页面的 rpcd 授权只覆盖 %s, 读写该目录会提示权限不足。').format(c.workdir, ACL_WORKDIR) ]),
 
