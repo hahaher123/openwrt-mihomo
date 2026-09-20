@@ -88,8 +88,9 @@ define Package/mihomo/install
 
 	$(INSTALL_DIR) $(1)/etc/mihomo/
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/docs/config.yaml $(1)/etc/mihomo/example.yaml
-	$(INSTALL_BIN) $(CURDIR)/files/tproxy.sh $(1)/etc/mihomo/tproxy.sh
-	$(INSTALL_DATA) $(CURDIR)/files/clash.nft $(1)/etc/mihomo/clash.nft
+	# tproxy.sh 与 clash.nft 由 luci-app-mihomo 安装（随其 root/ 目录释放），
+	# mihomo.init 对两者都做了 [ -f ] 守卫，单独安装 mihomo 包时透明代理
+	# 相关的加载步骤会自动跳过。
 
 	$(INSTALL_DATA) $(DL_DIR)/Country.mmdb $(1)/etc/mihomo/Country.mmdb
 	$(INSTALL_DATA) $(DL_DIR)/geoip.dat $(1)/etc/mihomo/geoip.dat

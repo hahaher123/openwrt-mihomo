@@ -8,10 +8,11 @@
 ```
 openwrt-mihomo/
 ├── mihomo/            # mihomo 包：/usr/bin/mihomo、/etc/init.d/mihomo、/etc/config/mihomo
-│                      #             /etc/mihomo/{tproxy.sh,clash.nft}
 └── luci-app-mihomo/   # LuCI 管理界面（依赖 mihomo 包，编译时自动先编译 mihomo）
                        # 另随装 /etc/mihomo/config.sh    （「配置文件」页的导入/更新辅助脚本）
                        #       /etc/mihomo/autoupdate.sh（定时更新的计划任务管理脚本）
+                       #       /etc/mihomo/tproxy.sh    （透明代理的 fwmark 策略路由脚本）
+                       #       /etc/mihomo/clash.nft    （透明代理的 nft 规则，独立表 inet clash）
 ```
 
 - 面向 OpenWrt 25 的原生 mihomo 构建（APK 包格式），自带 procd init 脚本与 uci 配置
