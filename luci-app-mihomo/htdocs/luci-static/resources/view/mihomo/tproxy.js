@@ -1,5 +1,6 @@
 'use strict';
 'require view';
+'require poll';
 'require fs';
 'require uci';
 'require ui';
@@ -9,6 +10,7 @@ var NFT_PATH = '/etc/mihomo/clash.nft';
 
 return view.extend({
 	handleToggleTransparent: function(ev) {
+		var self = this;
 		var next = (uci.get('mihomo', 'main', 'transparent') == '1') ? '0' : '1';
 
 		uci.set('mihomo', 'main', 'transparent', next);
@@ -19,6 +21,10 @@ return view.extend({
 			ui.addNotification(null, E('p', next == '1'
 				? _('透明代理已开启, mihomo 重启后将自动加载路由与 nft 规则')
 				: _('透明代理已关闭, 规则将在服务停止/重启时移除')), 'info');
+
+			// 立即同步开关显示, 不等轮询周期
+			if (self.updateToggleUI)
+				self.updateToggleUI();
 		}).catch(function(e) {
 			ui.addNotification(null, E('p', _('修改透明代理开关失败: %s').format(String(e.message || e))), 'error');
 		});
@@ -63,17 +69,36 @@ return view.extend({
 
 	render: function(data) {
 		var self = this;
-		var transparent = (uci.get('mihomo', 'main', 'transparent') == '1');
 
 		var transparentBtn = E('button', {
-			'class': 'btn cbi-button ' + (transparent ? 'cbi-button-negative' : 'cbi-button-positive'),
+			'class': 'btn cbi-button',
 			'style': 'font-size:1.1em; padding:8px 22px;',
 			'click': ui.createHandlerFn(self, 'handleToggleTransparent')
-		}, [ transparent ? _('关闭透明代理') : _('开启透明代理') ]);
+		}, [ '' ]);
 
 		var transparentInfo = E('span', {
-			'style': 'margin-left:12px; font-weight:600; color:' + (transparent ? '#2e9e44' : '#b06000')
-		}, [ transparent ? _('已开启') : _('未开启') ]);
+			'style': 'margin-left:12px; font-weight:600;'
+		}, [ '' ]);
+
+		// 开关按钮与状态文字统一从这里刷新: 首次渲染、点击开关之后、
+		// 以及轮询发现 uci 状态变化 (比如在别处修改过) 时都走这一条路。
+		this.updateToggleUI = function() {
+			var on = (uci.get('mihomo', 'main', 'transparent') == '1');
+
+			transparentBtn.className = 'btn cbi-button ' + (on ? 'cbi-button-negative' : 'cbi-button-positive');
+			transparentBtn.textContent = on ? _('关闭透明代理') : _('开启透明代理');
+
+			transparentInfo.style.color = on ? '#2e9e44' : '#b06000';
+			transparentInfo.textContent = on ? _('已开启') : _('未开启');
+		};
+
+		this.updateToggleUI();
+
+		// 轮询同步开关状态: 点了开关后若 apply 尚未落地、或在其它页面改过,
+		// 这里会自动把按钮与状态文字纠正过来。
+		poll.add(function() {
+			return Promise.resolve(self.updateToggleUI());
+		}, 5);
 
 		var editor = function(rows) {
 			return E('textarea', {

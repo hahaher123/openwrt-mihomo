@@ -8,6 +8,7 @@
 			"file": {
 				"/usr/bin/mihomo": [ "exec" ],
 				"/sbin/logread": [ "exec" ],
+				"/bin/date": [ "exec" ],
 				"/etc/init.d/mihomo": [ "exec" ],
 				"/etc/mihomo": [ "list" ],
 				"/etc/mihomo/*": [ "read" ],

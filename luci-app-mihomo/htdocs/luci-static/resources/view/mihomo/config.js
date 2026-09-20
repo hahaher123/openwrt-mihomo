@@ -485,6 +485,12 @@ return view.extend({
 		return uci.save().then(function() {
 			return uci.apply();
 		}).then(function() {
+			// 顶部「现为 %s」与列表里的当前配置标记同步更新
+			var c = self.cfg();
+
+			if (self.conffileInfo)
+				self.conffileInfo.textContent = _('当前生效配置由 uci mihomo.main.conffile 指定 (与 /etc/init.d/mihomo 同源), 现为 %s。').format(c.conffile);
+
 			if (!restart) {
 				self.setResult('ok', _('已设为当前配置'), path + '\n' + _('重启 mihomo 服务后生效。'));
 				return self.refreshList();
@@ -877,12 +883,17 @@ return view.extend({
 			}, [ label ]);
 		};
 
+		// 「当前生效配置」一行做成动态节点: 切换配置后立即改写, 不用手动刷新页面
+		this.conffileInfo = E('span', {}, [
+			_('当前生效配置由 uci mihomo.main.conffile 指定 (与 /etc/init.d/mihomo 同源), 现为 %s。').format(c.conffile)
+		]);
+
 		var root = E([
 			E('h2', {}, [ _('配置文件') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
 				_('管理 %s 下的 clash/mihomo 配置文件: 远程导入订阅、选择运行哪一个、直接编辑内容。').format(c.workdir),
 				E('br'),
-				_('当前生效配置由 uci mihomo.main.conffile 指定 (与 /etc/init.d/mihomo 同源), 现为 %s。').format(c.conffile),
+				this.conffileInfo,
 				E('br'),
 				_('校验使用上游自带的 mihomo -t, 参数与服务启动一致; 保存与保存并重启都会先校验, 校验不通过不会写入文件。')
 			]),
