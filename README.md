@@ -8,6 +8,8 @@
 ```
 openwrt-mihomo/
 ├── mihomo/            # mihomo 包：/usr/bin/mihomo、/etc/init.d/mihomo、/etc/config/mihomo
+│                      #             /etc/mihomo/example.yaml 与地理数据库
+│                      #             （Country.mmdb、geoip.dat、geosite.dat，打包时自动下载）
 └── luci-app-mihomo/   # LuCI 管理界面（依赖 mihomo 包，编译时自动先编译 mihomo）
                        # 另随装 /etc/mihomo/config.sh    （「配置文件」页的导入/更新辅助脚本）
                        #       /etc/mihomo/autoupdate.sh（定时更新的计划任务管理脚本）
