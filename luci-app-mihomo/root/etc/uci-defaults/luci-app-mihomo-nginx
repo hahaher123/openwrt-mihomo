@@ -1,0 +1,6 @@
+#!/bin/sh
+# 安装/升级后让 nginx 读入 conf.d/luci-app-mihomo.conf (client_body_buffer_size)。
+# uhttpd 环境没有 nginx, 直接跳过。
+[ -x /etc/init.d/nginx ] || exit 0
+/etc/init.d/nginx restart >/dev/null 2>&1 || true
+exit 0
