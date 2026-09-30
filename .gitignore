@@ -1,2 +1,5 @@
 # local scratch space for verification scripts / logs
 tmp/
+
+# 本地打包出的 apk 产物（验证用，不进仓库；正式包由 CI 编译并挂到 Release）
+reports/
