@@ -29,7 +29,8 @@
 				"/etc/mihomo/autoupdate.sh": [ "exec" ],
 				"/etc/mihomo/tproxy.sh": [ "write" ],
 				"/etc/mihomo/clash.nft": [ "write" ],
-				"/tmp/mihomo-config-check.yaml": [ "write" ]
+				"/tmp/mihomo-config-check.yaml": [ "write" ],
+				"/tmp/mihomo-config-upload.*": [ "write" ]
 			},
 			"uci": [ "mihomo" ]
 		}

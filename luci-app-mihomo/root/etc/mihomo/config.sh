@@ -4,6 +4,10 @@
 #   config.sh import <url> [name] [force]   download a remote clash/mihomo
 #                                           profile, validate it and install
 #                                           it into the work directory
+#   config.sh install <src> <name>          validate a file that was staged in
+#                                           /tmp (the LuCI page writes edited
+#                                           configs there in small chunks) and
+#                                           install it into the work directory
 #   config.sh update <name> [url]           re-download the subscription and
 #                                           replace ONLY the "proxies" and
 #                                           "proxy-groups" sections of an
@@ -15,9 +19,11 @@
 #                                           mihomo is restarted.
 #   config.sh help
 #
-# Only the network facing part lives here; the LuCI "配置文件" page handles
-# listing, reading, editing and installing edited files directly through the
-# rpcd file API and calls this script for imports and section-only updates.
+# Only the network facing part lives here plus the "install" step for edited
+# files; the LuCI "配置文件" page handles listing, reading and editing directly
+# through the rpcd file API, stages the edited content in /tmp in small chunks
+# (a single large request body kills nginx's ubus module) and then calls
+# "config.sh install" to validate and atomically install it.
 #
 # The work directory and the config file name are read from /etc/config/mihomo
 # so that this script always agrees with /etc/init.d/mihomo.
@@ -61,6 +67,7 @@ trap cleanup EXIT INT TERM
 usage() {
 	cat <<EOF
 Usage: $0 import <url> [name] [force]
+       $0 install <src> <name>
        $0 update <name> [url]
        $0 help
 
@@ -70,19 +77,28 @@ Usage: $0 import <url> [name] [force]
                   missing
           force   overwrite the target if it already exists
 
+  install src     path of an already assembled profile outside the work
+                  directory (the LuCI "配置文件" page stages edited content in
+                  /tmp and uploads it in small chunks, because a single large
+                  request body kills nginx's ubus module)
+          name    target file name inside the work directory; the target is
+                  replaced
+
   update  name    existing profile whose "proxies" and "proxy-groups" sections
                   should be refreshed
           url     subscription URL; when omitted the URL recorded for that
                   profile (see <workdir>/sources) is used
 
-Everything downloaded is validated with "mihomo -t" before it replaces
-anything on disk. "update" only touches the "proxies" and "proxy-groups"
-sections: every other setting in the local file, including manual edits, is
-left untouched. If those two sections turn out to be identical to what is
-already in the file, nothing is written at all and mihomo is not restarted;
-otherwise the file is updated and mihomo is restarted so that the new servers
-take effect immediately. The last line of the output is a machine readable
-"RESULT: unchanged|updated|updated-restarted" marker.
+Everything downloaded or staged is validated with "mihomo -t" before it
+replaces anything on disk, and the replacement happens through a rename inside
+the work directory, so the target file is either the old or the new one and
+never a half written one. "update" only touches the "proxies" and
+"proxy-groups" sections: every other setting in the local file, including
+manual edits, is left untouched. If those two sections turn out to be identical
+to what is already in the file, nothing is written at all and mihomo is not
+restarted; otherwise the file is updated and mihomo is restarted so that the
+new servers take effect immediately. The last line of the output is a machine
+readable "RESULT: unchanged|updated|updated-restarted" marker.
 EOF
 }
 
@@ -669,6 +685,68 @@ do_import() {
 }
 
 # ---------------------------------------------------------------------------
+# 命令: install  (把页面拼好的暂存文件原子装进工作目录)
+# ---------------------------------------------------------------------------
+
+# 页面的「保存 / 保存并重启」不再把整份配置经 fs.write 一次发出去，而是分成
+# 小块写到 /tmp 的暂存文件里 —— 一次性的大请求体会把 nginx 的 ubus 模块打崩
+# (详见 htdocs/luci-static/resources/view/mihomo/upload.js)。这里负责收口：
+# 复校一次 mihomo -t，然后按 do_import 的老办法原子装进工作目录。
+#
+# 为什么在这儿还要再校验一遍：页面已经校验过了，但暂存文件在 /tmp 里躺着，
+# 期间那台机器上任何东西都能改它。装之前自己看一遍，是"候选内容通过校验前
+# 绝不进工作目录"这条约定的最后一道门。
+do_install() {
+	local src="$1" name="$2"
+	local target stage
+
+	[ -n "$src" ] || die "缺少源文件"
+	[ -n "$name" ] || die "缺少配置文件名"
+
+	normalize_name "$name"
+	name="$NAME"
+	target="$WORKDIR/$name"
+
+	[ -f "$src" ] || die "install 失败: 源文件不存在 ($src)"
+	[ -s "$src" ] || die "install 失败: 源文件是空的 ($src)"
+	[ -x "$PROG" ] || die "install 失败: mihomo 主程序不存在 ($PROG)"
+
+	mkdir -p "$WORKDIR" || die "无法创建目录 $WORKDIR"
+
+	echo "== 校验 (mihomo -t) =="
+	if ! check_file "$src"; then
+		echo
+		die "install 失败: 配置未通过 mihomo -t 校验, 未写入 $target"
+	fi
+	echo
+
+	# Rename within the same directory so the target is either the old or the
+	# new file, never a half written one. 0600 matches INSTALL_CONF (配置里
+	# 有订阅凭据, 不宜全局可读)。
+	stage="$WORKDIR/.$name.$$"
+	TMPFILES="$TMPFILES $stage"
+	cp -f "$src" "$stage" || die "install 失败: 写入暂存文件失败 ($stage)"
+	chmod 600 "$stage"
+	if ! mv -f "$stage" "$target"; then
+		die "install 失败: 替换 $target 失败"
+	fi
+
+	# 装完就把页面放在 /tmp 的那份删掉: 里面是含订阅凭据的明文, 没理由让它
+	# 在临时目录里继续躺着 (页面的 rpcd 授权也覆盖这个前缀, 别人读得到)。
+	rm -f "$src"
+
+	echo "== 完成 =="
+	echo "已写入: $target"
+
+	if [ "$target" = "$CONFFILE" ]; then
+		echo "该文件正是当前生效的配置, 重启 mihomo 服务后生效。"
+	else
+		echo "当前生效的配置是 $CONFFILE"
+		echo "如需使用新配置, 请在页面上选中它并点击\"设为当前配置并重启\"。"
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # 命令: update  (只替换 proxies / proxy-groups 两段, 其余内容原样保留)
 # ---------------------------------------------------------------------------
 
@@ -905,6 +983,10 @@ case "$cmd" in
 	import)
 		load_config
 		do_import "$1" "$2" "$3"
+		;;
+	install)
+		load_config
+		do_install "$1" "$2"
 		;;
 	update)
 		load_config

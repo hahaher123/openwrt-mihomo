@@ -3,6 +3,8 @@
 'require fs';
 'require uci';
 'require ui';
+'require rpc';
+'require view.mihomo.upload as chunkedUpload';
 
 //
 // 配置文件管理页
@@ -16,6 +18,9 @@
 //   (由 /etc/mihomo/config.sh update 完成)
 // - 直接编辑选中的配置文件: 校验 / 保存 / 保存并重启
 //   保存与保存并重启都会先校验, 校验不通过不写文件
+//   内容不是一次性发上来的, 而是由 upload.js 切成小块分多次 RPC 追进 /tmp 的
+//   暂存文件 (一次大请求体会把 nginx 的 ubus 模块打崩), 校验通过后交给
+//   config.sh install 再校一遍并按 rename 原子装进 workdir
 // - 定时更新: 把「仅更新」写成一条 cron 计划任务 (由 /etc/mihomo/autoupdate.sh
 //   的 set/apply 写 /etc/crontabs/root, 只动它自己那块带标记的内容), 设置存在
 //   uci mihomo.autoupdate (enabled/target/schedule/url); 本页面只读 uci,
@@ -33,6 +38,21 @@ var MIHOMO_BIN = '/usr/bin/mihomo';
 var HELPER = '/etc/mihomo/config.sh';
 var AUTOUPDATE = '/etc/mihomo/autoupdate.sh';
 var CHECK_FILE = '/tmp/mihomo-config-check.yaml';
+
+// 编辑区里的整份内容先一小块一小块追加到 STAGE_PREFIX 开头的暂存文件, 再由
+// config.sh install 复校一次并原子装进 workdir。前缀必须与 rpcd 的 file ACL
+// 里那条 "/tmp/mihomo-config-upload.*" 一致。
+var STAGE_PREFIX = '/tmp/mihomo-config-upload.';
+
+// 分块直接走 rpcd 的 file.write: 它比 fs.write 多一个 append 参数, 可以把各块
+// 依次追加进同一个文件。而 fs.write 是把整份内容一次性塞进一个请求体 —— 那正是
+// 要避开的东西 (见 upload.js 的说明)。
+var callFileAppend = rpc.declare({
+	object: 'file',
+	method: 'write',
+	params: [ 'path', 'data', 'append', 'mode' ],
+	expect: {}
+});
 
 var DEFAULT_WORKDIR = '/etc/mihomo';
 var DEFAULT_CONFFILE = '/etc/mihomo/config.yaml';
@@ -201,16 +221,97 @@ return view.extend({
 
 	// ---------------- 校验 / 重启 ----------------
 
-	// 用 mihomo -t 校验一段配置内容, 返回 { code, stdout, stderr }。
-	// 注意 fs.exec 在命令退出码非 0 时不会 reject, 必须自己看 code。
-	validateContent: function(content, workdir) {
-		return fs.write(CHECK_FILE, content).then(function() {
-			return fs.exec(MIHOMO_BIN, [ '-t', '-f', CHECK_FILE, '-d', workdir ]);
+	// 一块的完整内容 = 正文 + 被摘掉的尾随换行。
+	//
+	// upload.js 会把每块末尾的换行摘下来单独放在 chunk.newlines 里 —— 那是给
+	// oxidns 那套"服务端用 shell 命令替换取值、命令替换会吃掉尾随换行"的协议准备
+	// 的。本包走 rpcd 的 file.write, 没有任何人会替我们补回去, 所以必须自己拼回
+	// 原样: 少了这一步, 存下来的配置会丢掉结尾的换行, 盘上的文件与编辑区、与
+	// mihomo -t 校验过的那一份就不是同一份内容了。
+	chunkText: function(chunk) {
+		var text = chunk.text;
+
+		for (var i = 0; i < (chunk.newlines || 0); i++)
+			text += '\n';
+
+		return text;
+	},
+
+	// 分块写一份暂存文件, 解析成最后一块的回包 (失败时是 { ok: false, code, message })。
+	//
+	// 中间块要合成一个 pending: true 的回包交给 uploadText —— rpcd 的 file.write
+	// 成功时只回一个空对象, 没有 pending 字段, 而 uploadText 把"中间块没有 pending"
+	// 当成"服务端收下但没存住"。这里把"write 成功"翻译成 pending。
+	writeChunked: function(path, content, onProgress) {
+		var self = this;
+
+		return chunkedUpload.uploadText(content, function(chunk, last) {
+			/* 第一块用 append = false 截断重建: 同名暂存文件可能是上一次中断
+			 * 留下的, 直接追加会拼出脏内容。0600 与 workdir 里的配置一致。 */
+			return callFileAppend(path, self.chunkText(chunk), chunk.offset > 0, 384).then(function() {
+				return { ok: true, pending: !last, stored: true };
+			});
+		}, onProgress);
+	},
+
+	// 跑一次上游校验器。注意 fs.exec 在命令退出码非 0 时不会 reject, 必须自己看 code。
+	runCheck: function(path, workdir) {
+		return fs.exec(MIHOMO_BIN, [ '-t', '-f', path, '-d', workdir ]);
+	},
+
+	// 上传阶段的失败也返回 mihomo -t 那种 { code, stdout, stderr } 形状, 让调用方
+	// 不必多长一条错误分支。code 用 -1 以便与真实退出码 (只有 0/1) 区分开。
+	uploadFailure: function(result) {
+		return {
+			code: -1,
+			stdout: '',
+			stderr: _('内容分块上传失败: %s').format((result && (result.message || result.code)) || '?')
+		};
+	},
+
+	// 校验编辑区里的一段内容: 分块写进 /tmp 的暂存文件再用 mihomo -t 校验它,
+	// 不碰 workdir 里的任何东西。
+	//
+	// 放 /tmp 校验与放 workdir 校验等价: mihomo 按 -d 解析配置内的相对路径
+	// (constant/path.go 的 Resolve 用 HomeDir), 与配置文件自身的位置无关, 所以
+	// 不必为了校验去写 flash。
+	validateContent: function(content, workdir, onProgress) {
+		var self = this;
+
+		return this.writeChunked(CHECK_FILE, content, onProgress).then(function(result) {
+			if (!result || result.ok === false)
+				return self.uploadFailure(result);
+
+			return self.runCheck(CHECK_FILE, workdir);
 		});
 	},
 
 	failText: function(code) {
+		if (code == -1)
+			return _('内容上传失败');
+
 		return _('校验失败 (mihomo -t 退出码 %s)').format(code);
+	},
+
+	// 分块上传的进度提示: 直接改写横幅的 <pre>。块数太少时 progressSuffix 返回
+	// 空串 (百分比只会闪一下), 这时只显示 "n/m"。
+	progressReporter: function(prefix) {
+		var self = this;
+		var k = KIND.info;
+
+		return function(done, total) {
+			if (!self.banner || !self.bannerPre)
+				return;
+
+			self.banner.style.display = '';
+			self.banner.style.background = k[0];
+			self.banner.style.borderLeftColor = k[1];
+			self.banner.style.color = k[2];
+			self.bannerTitle.textContent = k[3] + '  ' + prefix;
+			self.bannerPre.style.display = '';
+			self.bannerPre.textContent = _('第 %d/%d 块').format(done, total) +
+				chunkedUpload.progressSuffix(done, total);
+		};
 	},
 
 	restartService: function() {
@@ -535,18 +636,25 @@ return view.extend({
 
 		this.setResult('info', _('正在校验…'), '', true);
 
-		return this.validateContent(this.ta.value, c.workdir).then(function(res) {
-			var ok = (res && res.code == 0);
+		return this.validateContent(this.ta.value, c.workdir, this.progressReporter(_('正在校验…')))
+			.then(function(res) {
+				var ok = (res && res.code == 0);
 
-			self.setResult(ok ? 'ok' : 'err',
-				ok ? _('校验通过, 配置可被 mihomo 正常加载') : self.failText(res ? res.code : '?'),
-				joinOutput(res) || _('(无输出)'));
-		}, function(e) {
-			self.setResult('err', _('校验无法执行'), String(e.message || e));
-		});
+				self.setResult(ok ? 'ok' : 'err',
+					ok ? _('校验通过, 配置可被 mihomo 正常加载') : self.failText(res ? res.code : '?'),
+					joinOutput(res) || _('(无输出)'));
+			}, function(e) {
+				self.setResult('err', _('校验无法执行'), String(e.message || e));
+			});
 	},
 
-	// 保存与保存并重启共用: 先校验, 通过才写盘; restart 为真时再重启服务。
+	// 保存与保存并重启共用: 把编辑区的内容分块写进 /tmp 的暂存文件, 用 mihomo -t
+	// 校验它, 通过后交给 config.sh install 原子装进 workdir。
+	//
+	// 为什么这么绕: 一次大请求体会把 nginx 的 ubus 模块打崩 (见 upload.js), 所以
+	// 内容只能分块发; 而分块发就必然有中间态 —— 于是先把完整的一份拼在 /tmp,
+	// 校验通过后才由脚本按同目录 rename 换上去, 目标文件永远要么是旧的、要么是
+	// 新的, 不会是半个。
 	doSave: function(restart) {
 		var self = this;
 		var name = this.selected;
@@ -558,44 +666,85 @@ return view.extend({
 
 		var c = this.cfg();
 		var path = this.pathOf(name);
-		var content = this.ta.value;
+		var stage = null;
 
-		this.setResult('info', _('正在校验…'), '', true);
+		this.setResult('info', _('正在保存…'), '', true);
 
-		return this.validateContent(content, c.workdir).then(function(res) {
-			if (!res || res.code != 0) {
-				self.setResult('err', _('校验失败, 未保存'),
-					(res && res.code != null ? self.failText(res.code) + '\n\n' : '') +
-					(joinOutput(res) || _('(无输出)')));
+		var upload = chunkedUpload.uploadText(this.ta.value, function(chunk, last, uploadId) {
+			/* 暂存名里带 upload_id: 两次保存不会撞同一个文件, 也不用担心上一次
+			 * 中断留下的同名文件被续写。 */
+			stage = STAGE_PREFIX + name + '.' + uploadId;
+
+			return callFileAppend(stage, self.chunkText(chunk), chunk.offset > 0, 384).then(function() {
+				return { ok: true, pending: !last, stored: true };
+			});
+		}, this.progressReporter(_('正在保存…')));
+
+		return upload.then(function(result) {
+			if (!result || result.ok === false) {
+				self.setResult('err', _('保存失败'),
+					_('内容分块上传失败: %s').format((result && (result.message || result.code)) || '?'));
 				return;
 			}
 
-			// 0644 会被 rpcd 用在新建文件上, 这里显式请求 0600 (与 INSTALL_CONF 一致),
-			// 配置文件含订阅凭据, 不宜全局可读。
-			return fs.write(path, content, 384).then(function() {
-				if (!restart) {
-					self.setResult('ok', _('保存成功'),
-						path + '\n' + _('校验已通过, 重启 mihomo 服务后生效。'));
+			self.setResult('info', _('正在校验…'), '', true);
+
+			return self.runCheck(stage, c.workdir).then(function(res) {
+				if (!res || res.code != 0) {
+					self.setResult('err', _('校验失败, 未保存'),
+						(res && res.code != null ? self.failText(res.code) + '\n\n' : '') +
+						(joinOutput(res) || _('(无输出)')));
 					return;
 				}
 
-				self.setResult('info', _('已保存, 正在重启服务…'), path, true);
-
-				return self.restartService().then(function(r) {
-					var ok = (r && r.code == 0);
-					var out = joinOutput(r);
-
-					self.setResult(ok ? 'ok' : 'err',
-						ok ? _('保存并重启成功') : _('保存成功, 但服务重启失败 (退出码 %s)').format(r ? r.code : '?'),
-						path + '\n\n' + (out || _('(无输出)')) + self.restartNote());
-
-					return self.refreshList();
-				});
+				return self.installStaged(stage, name, path, restart);
 			}, function(e) {
-				self.setResult('err', _('保存失败'), String(e.message || e));
+				self.setResult('err', _('校验无法执行'), String(e.message || e));
 			});
 		}, function(e) {
-			self.setResult('err', _('校验无法执行'), String(e.message || e));
+			self.setResult('err', _('保存失败'), String(e.message || e));
+		});
+	},
+
+	// 把已校验过的暂存文件装进 workdir (走 config.sh install: 它会自己再校一遍
+	// —— 暂存文件在 /tmp 里躺着, 这期间别的进程能改它 —— 然后按 rename 换成
+	// 目标文件), 必要时重启服务。
+	installStaged: function(stage, name, path, restart) {
+		var self = this;
+
+		this.setResult('info', _('正在写入…'), '', true);
+
+		return fs.exec(HELPER, [ 'install', stage, name ]).then(function(res) {
+			var code = (res && res.code != null) ? res.code : '?';
+			var out = joinOutput(res);
+
+			if (code != 0) {
+				self.setResult('err', _('保存失败'),
+					_('校验已通过, 但写入 %s 失败 (退出码 %s)').format(path, code) + '\n\n' +
+					(out || _('(无输出)')));
+				return;
+			}
+
+			if (!restart) {
+				self.setResult('ok', _('保存成功'),
+					path + '\n' + _('校验已通过, 重启 mihomo 服务后生效。'));
+				return self.refreshList();
+			}
+
+			self.setResult('info', _('已保存, 正在重启服务…'), path, true);
+
+			return self.restartService().then(function(r) {
+				var ok = (r && r.code == 0);
+				var rout = joinOutput(r);
+
+				self.setResult(ok ? 'ok' : 'err',
+					ok ? _('保存并重启成功') : _('保存成功, 但服务重启失败 (退出码 %s)').format(r ? r.code : '?'),
+					path + '\n\n' + (rout || _('(无输出)')) + self.restartNote());
+
+				return self.refreshList();
+			});
+		}, function(e) {
+			self.setResult('err', _('保存失败'), String(e.message || e));
 		});
 	},
 
