@@ -1,0 +1,130 @@
+name: 每周检查 mihomo 上游版本
+
+# 触发方式：
+#   1. 定时 —— 每周一 02:00 UTC（北京时间 10:00）探测一次 MetaCubeX/mihomo 的最新
+#      正式版（draft / prerelease 不计入）。
+#   2. 手动 —— Actions 页面 "Run workflow"，用于立即补跑；上游没有新版本时勾选
+#      force 可强制重新构建当前版本（等价于到 build.yml 手动跑一次 force）。
+#
+# 逻辑：
+#   上游版本 > Makefile 的 PKG_VERSION 时，改写 mihomo/Makefile：
+#     PKG_VERSION := <上游最新>
+#     PKG_RELEASE := 1        （按仓库约定，升上游版本时修订号复位）
+#   提交并推送，然后显式 dispatch build.yml —— GITHUB_TOKEN 推送产生的 push
+#   事件不会触发其它 workflow（GitHub 防递归），不 dispatch 就不会构建。
+#
+# 说明：mihomo 包用 PKG_SOURCE_URL 拉上游 tag 的源码 tarball 自行编译，
+#   PKG_HASH=skip，因此跟进版本只需改 PKG_VERSION，无需同步任何校验和；
+#   也没有预编译资产命名变化的兼容问题。
+
+on:
+  schedule:
+    # 每周一 02:00 UTC = 北京时间 10:00
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '上游没有新版本时也触发一次构建（重新发布当前版本）'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # 提交 Makefile 并推送
+  actions: write    # dispatch build.yml
+
+# 定时与手动不要并发改同一个 Makefile。
+concurrency:
+  group: upstream-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: 探测上游并跟进
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source tree
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 探测上游最新正式版
+        id: probe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+
+          CUR=$(sed -n 's/^PKG_VERSION:=//p' mihomo/Makefile | head -n1 | tr -d ' ')
+          [ -n "$CUR" ] || { echo "::error::读不到 mihomo/Makefile 的 PKG_VERSION"; exit 1; }
+
+          # releases/latest 只返回最新正式版；API 失败时宁可报错，不要当成"无更新"静默跳过
+          TAG=$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+            | jq -r '.tag_name // empty')
+          [ -n "$TAG" ] || { echo "::error::上游 API 未返回 tag_name"; exit 1; }
+          LATEST=${TAG#v}
+
+          echo "$LATEST" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::上游 tag 不是 x.y.z 形式: $TAG"; exit 1; }
+
+          # 只在「不相等且排序更大」时跟进，避免上游回退 / 本仓库超前时降级
+          NEWER=false
+          if [ "$LATEST" != "$CUR" ] && \
+             [ "$(printf '%s\n%s\n' "$CUR" "$LATEST" | sort -V | tail -n1)" = "$LATEST" ]; then
+            NEWER=true
+          fi
+
+          echo "current=${CUR}"   >> "$GITHUB_OUTPUT"
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
+          echo "newer=${NEWER}"   >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 上游版本探测"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 当前 PKG_VERSION | \`${CUR}\` |"
+            echo "| 上游最新正式版 | \`${LATEST}\` |"
+            echo "| 是否需要跟进 | ${NEWER} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 改写 Makefile 并推送
+        if: steps.probe.outputs.newer == 'true' || inputs.force
+        env:
+          LATEST: ${{ steps.probe.outputs.latest }}
+        run: |
+          set -eu
+
+          sed -i "s|^PKG_VERSION:=.*|PKG_VERSION:=${LATEST}|" mihomo/Makefile
+          sed -i "s|^PKG_RELEASE:=.*|PKG_RELEASE:=1|" mihomo/Makefile
+          echo "--- 改写后 ---"
+          grep -E '^PKG_(VERSION|RELEASE):=' mihomo/Makefile
+
+          if git diff --quiet -- mihomo/Makefile; then
+            echo "版本未变化（force 模式）：跳过提交，直接触发构建"
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mihomo/Makefile
+          git commit -m "feat(mihomo): 升级上游版本至 v${LATEST}"
+          git push origin HEAD:main
+
+      - name: 触发构建与发布
+        if: steps.probe.outputs.newer == 'true' || inputs.force
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          # 必须显式 dispatch：GITHUB_TOKEN 推送的 commit 不会触发 push 型 workflow
+          gh workflow run build.yml --ref main
+          echo "已触发 build.yml（tag 将由 build.yml 按两个 Makefile 的版本自动生成）"
+
+      - name: 无新版本
+        if: steps.probe.outputs.newer != 'true' && !inputs.force
+        run: |
+          echo "上游与 Makefile 版本一致或更旧，本次不做改动。"

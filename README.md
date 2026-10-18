@@ -98,7 +98,8 @@ make package/luci-app-mihomo/compile V=s           # 硬依赖 +mihomo，自动�
 
 推送 main 且**任一 Makefile 的版本号**（`PKG_VERSION` / `PKG_RELEASE`）变化时，自动构建并发布 Release（按 tag 判重，同版本不重复构建）；也可在 [Actions → Build and release Mihomo APK](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/build.yml) 手动 Run workflow 重跑（勾选 force 可在版本未变时强制重建并覆盖资产）。产物含 x86_64 与 aarch64_generic 两个架构。
 
-- **tag 规则**：`v<mihomo 版本>-r<修订>-luci<LuCI 版本>-r<修订>`，当前对应 `v1.19.31-r2-luci1.0.3-r4`
+- **tag 规则**：`v<mihomo 版本>-r<修订>-luci<LuCI 版本>-r<修订>`，当前对应 `v1.19.31-r2-luci1.0.3-r5`
 - **版本号约定**：修 bug / 调整已安装文件只升 `PKG_RELEASE`；新增功能或跟进上游版本升 `PKG_VERSION` 并把 `PKG_RELEASE` 重置为 `1`；只改文档或 CI 不动版本号
+- **上游自动跟进**：每周一 10:00（北京时间）探测 MetaCubeX/mihomo 的最新正式版，高于当前 `PKG_VERSION` 时自动升版本、推送并触发构建发布
 
 上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。
