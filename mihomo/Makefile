@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mihomo
 PKG_VERSION:=1.19.32
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/MetaCubeX/mihomo/tar.gz/v$(PKG_VERSION)?
@@ -85,11 +85,15 @@ define Package/mihomo/install
 	# 相关的加载步骤会自动跳过。
 
 	$(INSTALL_DATA) $(DL_DIR)/Country.mmdb $(1)/etc/mihomo/Country.mmdb
-	# geoip.dat / geosite.dat 不再随包发布（见文件头的 Download/country-mmdb 注释）。
-	# 需要 GEOSITE / GEOIP(dat) 规则的机器，把这两个名字指向共享库即可：
-	#   ln -sf /usr/share/v2ray/geoip.dat  /etc/mihomo/geoip.dat
-	#   ln -sf /usr/share/v2ray/geosite.dat /etc/mihomo/geosite.dat
-	# 共享库由镜像的 v2ray-geoip / v2ray-geosite 提供，内容与更新由 oxidns 负责。
+
+	# geoip.dat / geosite.dat 不再随包发布（见文件头的 Download/country-mmdb 注释），
+	# 装的是指向共享库的软链接：/usr/share/v2ray/ 由镜像的 v2ray-geoip /
+	# v2ray-geosite 两个包提供，内容与刷新由 oxidns 负责（mihomo 不参与更新）。
+	# mihomo 读 dat 的路径写死在 workdir 里、没有配置项，所以只能用链接把
+	# 「/etc/mihomo/geoip.dat」这个名字定位过去。geodata-mode: false（默认）时
+	# 这两个名字根本不会被打开，链接悬空也不影响启动。
+	$(LN) /usr/share/v2ray/geoip.dat $(1)/etc/mihomo/geoip.dat
+	$(LN) /usr/share/v2ray/geosite.dat $(1)/etc/mihomo/geosite.dat
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/mihomo.config $(1)/etc/config/mihomo
