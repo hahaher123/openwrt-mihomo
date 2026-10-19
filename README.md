@@ -7,8 +7,8 @@
 ```
 openwrt-mihomo/
 ├── mihomo/            # mihomo 包：/usr/bin/mihomo、/etc/init.d/mihomo、/etc/config/mihomo
-│                      #             /etc/mihomo/example.yaml 与地理数据库
-│                      #             （Country.mmdb、geoip.dat、geosite.dat，打包时自动下载）
+│                      #             /etc/mihomo/example.yaml 与 Country.mmdb（打包时自动下载）
+│                      #             geoip.dat / geosite.dat 不再随包发布，见「地理数据库」
 └── luci-app-mihomo/   # LuCI 管理界面（依赖 mihomo 包，编译时自动先编译 mihomo）
                        # 另随装 /etc/mihomo/config.sh    （「配置文件」页的导入/更新辅助脚本）
                        #       /etc/mihomo/autoupdate.sh（定时更新的计划任务管理脚本）
@@ -16,7 +16,7 @@ openwrt-mihomo/
                        #       /etc/mihomo/clash.nft    （透明代理的 nft 规则，独立表 inet clash）
 ```
 
-面向 OpenWrt 25 的原生 mihomo 构建（APK 包格式），自带 procd init 脚本与 uci 配置；打包时自动下载 [Loyalsoldier](https://github.com/Loyalsoldier/geoip) 的地理数据库，安装即含，无需首次运行在线下载。
+面向 OpenWrt 25 的原生 mihomo 构建（APK 包格式），自带 procd init 脚本与 uci 配置；打包时自动下载 [Loyalsoldier](https://github.com/Loyalsoldier/geoip) 的 `Country.mmdb`，安装即含，无需首次运行在线下载。
 
 ## 安装
 
@@ -29,6 +29,23 @@ $ apk add --allow-untrusted mihomo-1.19.31-r2_x86_64.apk luci-app-mihomo-1.0.3-r
 ```
 
 APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖；luci-app-mihomo 与架构无关（文件名不带架构后缀），两个架构通用。全部版本见 [Releases](https://github.com/hahaher123/openwrt-mihomo/releases)。
+
+## 地理数据库
+
+| 文件 | 落点 | 随包发布 | 谁更新 |
+| --- | --- | --- | --- |
+| `Country.mmdb` | `/etc/mihomo/Country.mmdb` | 是（打包时从 `Loyalsoldier/geoip` 下载） | mihomo 自己（`geo-auto-update`） |
+| `geoip.dat` | `/usr/share/v2ray/geoip.dat` | 否 | oxidns |
+| `geosite.dat` | `/usr/share/v2ray/geosite.dat` | 否 | oxidns |
+
+`geodata-mode: false`（推荐值）时 GEOIP 规则读的是 `Country.mmdb`，两个 `.dat` 根本不会被打开，
+所以它们不再进这个包 —— 统一由镜像的 `v2ray-geoip` / `v2ray-geosite` 提供在 `/usr/share/v2ray/`，
+刷新交给 oxidns 的 download 插件。真要写 `GEOSITE` 规则，把名字链过去即可：
+
+```sh
+ln -sf /usr/share/v2ray/geoip.dat   /etc/mihomo/geoip.dat
+ln -sf /usr/share/v2ray/geosite.dat /etc/mihomo/geosite.dat
+```
 
 ## LuCI 界面
 

@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mihomo
 PKG_VERSION:=1.19.32
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/MetaCubeX/mihomo/tar.gz/v$(PKG_VERSION)?
@@ -30,9 +30,17 @@ GO_PKG_TAGS:=with_gvisor
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 
-# Bundled geo databases (released to /etc/mihomo on install).
-# HASH:=skip on purpose: these branch files are updated upstream over time,
+# Bundled Country.mmdb (released to /etc/mihomo on install).
+# HASH:=skip on purpose: this branch file is updated upstream over time,
 # a pinned hash would break future builds. Verified against the jsdelivr CDN.
+#
+# geoip.dat / geosite.dat are deliberately NOT shipped any more:
+#   * geodata-mode: false (the recommended setting) makes mihomo read
+#     Country.mmdb for GEOIP rules, so the two .dat files are never opened;
+#   * the shared copies live in /usr/share/v2ray and are maintained by
+#     oxidns (its download plugin refreshes them on a schedule), so this
+#     package must not own or overwrite them.
+# Keep mihomo on the mmdb side only; see README "地理数据库".
 define Download/country-mmdb
   FILE:=Country.mmdb
   URL:=https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release
@@ -40,23 +48,7 @@ define Download/country-mmdb
   HASH:=skip
 endef
 
-define Download/geoip-dat
-  FILE:=geoip.dat
-  URL:=https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release
-  URL_FILE:=geoip.dat
-  HASH:=skip
-endef
-
-define Download/geosite-dat
-  FILE:=geosite.dat
-  URL:=https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release
-  URL_FILE:=geosite.dat
-  HASH:=skip
-endef
-
 $(eval $(call Download,country-mmdb))
-$(eval $(call Download,geoip-dat))
-$(eval $(call Download,geosite-dat))
 
 define Package/mihomo
   SECTION:=net
@@ -93,8 +85,11 @@ define Package/mihomo/install
 	# 相关的加载步骤会自动跳过。
 
 	$(INSTALL_DATA) $(DL_DIR)/Country.mmdb $(1)/etc/mihomo/Country.mmdb
-	$(INSTALL_DATA) $(DL_DIR)/geoip.dat $(1)/etc/mihomo/geoip.dat
-	$(INSTALL_DATA) $(DL_DIR)/geosite.dat $(1)/etc/mihomo/geosite.dat
+	# geoip.dat / geosite.dat 不再随包发布（见文件头的 Download/country-mmdb 注释）。
+	# 需要 GEOSITE / GEOIP(dat) 规则的机器，把这两个名字指向共享库即可：
+	#   ln -sf /usr/share/v2ray/geoip.dat  /etc/mihomo/geoip.dat
+	#   ln -sf /usr/share/v2ray/geosite.dat /etc/mihomo/geosite.dat
+	# 共享库由镜像的 v2ray-geoip / v2ray-geosite 提供，内容与更新由 oxidns 负责。
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/mihomo.config $(1)/etc/config/mihomo
