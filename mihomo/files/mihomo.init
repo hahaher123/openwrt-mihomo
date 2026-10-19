@@ -14,107 +14,107 @@ NAME="$(basename ${script:-$initscript})"
 PROG="/usr/bin/mihomo"
 
 start_service() {
-        config_load "$NAME"
+	config_load "$NAME"
 
-        local enabled user group conffile workdir ifaces
-        local log_stdout log_stderr
-        config_get_bool enabled "main" "enabled" "0"
-        [ "$enabled" -eq "1" ] || return 0
+	local enabled user group conffile workdir ifaces
+	local log_stdout log_stderr
+	config_get_bool enabled "main" "enabled" "0"
+	[ "$enabled" -eq "1" ] || return 0
 
-        config_get user "main" "user" "root"
-        config_get conffile "main" "conffile" "/etc/mihomo/config.yaml"
-        config_get ifaces "main" "ifaces"
-        config_get workdir "main" "workdir" "/etc/mihomo"
-        config_get_bool log_stdout "main" "log_stdout" "1"
-        config_get_bool log_stderr "main" "log_stderr" "1"
-        config_get_bool transparent "main" "transparent" "0"
+	config_get user "main" "user" "root"
+	config_get conffile "main" "conffile" "/etc/mihomo/config.yaml"
+	config_get ifaces "main" "ifaces"
+	config_get workdir "main" "workdir" "/etc/mihomo"
+	config_get_bool log_stdout "main" "log_stdout" "1"
+	config_get_bool log_stderr "main" "log_stderr" "1"
+	config_get_bool transparent "main" "transparent" "0"
 
-        [ -x "$PROG" ] || {
-                echo "Error: mihomo binary $PROG not found" >&2
-                return 1
-        }
-        [ -f "$conffile" ] || {
-                echo "Error: config file $conffile not found" >&2
-                return 1
-        }
+	[ -x "$PROG" ] || {
+		echo "Error: mihomo binary $PROG not found" >&2
+		return 1
+	}
+	[ -f "$conffile" ] || {
+		echo "Error: config file $conffile not found" >&2
+		return 1
+	}
 
-        mkdir -p "$workdir"
-        local group="$(id -ng $user)"
-        chown $user:$group "$workdir"
+	mkdir -p "$workdir"
+	local group="$(id -ng $user)"
+	chown $user:$group "$workdir"
 
-        # Transparent proxy (TPROXY): apply policy route and nft rules
-        # before mihomo starts.
-        if [ "$transparent" -eq "1" ]; then
-                [ -x /usr/sbin/nft ] || {
-                        echo "Error: nft not found, transparent proxy disabled" >&2
-                        return 1
-                }
-                nft delete table inet clash 2>/dev/null
-                if [ -f /etc/mihomo/clash.nft ]; then
-                        nft -f /etc/mihomo/clash.nft || \
-                                echo "Error: failed to load /etc/mihomo/clash.nft, transparent proxy rules NOT applied" >&2
-                fi
-                [ -f /etc/mihomo/tproxy.sh ] && sh /etc/mihomo/tproxy.sh start
-                grep -qE '^[[:space:]]*redir-port[[:space:]]*:' "$conffile" || \
-                        echo "Warning: 'redir-port' not set in $conffile, TCP redirect will not work" >&2
-                grep -qE '^[[:space:]]*tproxy-port[[:space:]]*:' "$conffile" || \
-                        echo "Warning: 'tproxy-port' not set in $conffile, UDP tproxy will not work" >&2
-        fi
+	# Transparent proxy (TPROXY): apply policy route and nft rules
+	# before mihomo starts.
+	if [ "$transparent" -eq "1" ]; then
+		[ -x /usr/sbin/nft ] || {
+			echo "Error: nft not found, transparent proxy disabled" >&2
+			return 1
+		}
+		nft delete table inet clash 2> /dev/null
+		if [ -f /etc/mihomo/clash.nft ]; then
+			nft -f /etc/mihomo/clash.nft ||
+				echo "Error: failed to load /etc/mihomo/clash.nft, transparent proxy rules NOT applied" >&2
+		fi
+		[ -f /etc/mihomo/tproxy.sh ] && sh /etc/mihomo/tproxy.sh start
+		grep -qE '^[[:space:]]*redir-port[[:space:]]*:' "$conffile" ||
+			echo "Warning: 'redir-port' not set in $conffile, TCP redirect will not work" >&2
+		grep -qE '^[[:space:]]*tproxy-port[[:space:]]*:' "$conffile" ||
+			echo "Warning: 'tproxy-port' not set in $conffile, UDP tproxy will not work" >&2
+	fi
 
-        procd_open_instance "$NAME.main"
-        procd_set_param command "$PROG" -f "$conffile" -d "$workdir"
+	procd_open_instance "$NAME.main"
+	procd_set_param command "$PROG" -f "$conffile" -d "$workdir"
 
-        # Use root user if you want to use transparent proxy (REDIRECT/TPROXY).
-        procd_set_param user "$user"
-        procd_set_param file "$conffile"
-        [ -z "$ifaces" ] || procd_set_param netdev $ifaces
-        procd_set_param stdout "$log_stdout"
-        procd_set_param stderr "$log_stderr"
-        procd_set_param respawn
+	# Use root user if you want to use transparent proxy (REDIRECT/TPROXY).
+	procd_set_param user "$user"
+	procd_set_param file "$conffile"
+	[ -z "$ifaces" ] || procd_set_param netdev $ifaces
+	procd_set_param stdout "$log_stdout"
+	procd_set_param stderr "$log_stderr"
+	procd_set_param respawn
 
-        procd_close_instance
+	procd_close_instance
 }
 
 stop_service() {
-        # Remove transparent proxy rules left over from a previous run.
-        sh /etc/mihomo/tproxy.sh stop 2>/dev/null
-        nft delete table inet clash 2>/dev/null
-        return 0
+	# Remove transparent proxy rules left over from a previous run.
+	sh /etc/mihomo/tproxy.sh stop 2> /dev/null
+	nft delete table inet clash 2> /dev/null
+	return 0
 }
 
 tproxystatus() {
-        [ -f /etc/config/$NAME ] && config_load "$NAME"
-        local transparent
-        config_get_bool transparent "main" "transparent" "0"
+	[ -f /etc/config/$NAME ] && config_load "$NAME"
+	local transparent
+	config_get_bool transparent "main" "transparent" "0"
 
-        echo "uci mihomo.main.transparent = $transparent$([ "$transparent" -eq 1 ] || echo '  (透明代理未开启, 规则应为空)')"
-        echo
-        echo "== ip rule =="
-        ip rule show
-        echo
-        echo "== ip route show table 256 =="
-        ip route show table 256 2>&1 | grep . || \
-                echo "(表 256 为空 —— tproxy.sh start 未执行或规则已被移除)"
-        echo
-        echo "== nft table inet clash =="
-        nft list table inet clash 2>/dev/null || \
-                echo "(表 inet clash 不存在 —— 透明代理未开启, 或 clash.nft 加载失败)"
-        return 0
+	echo "uci mihomo.main.transparent = $transparent$([ "$transparent" -eq 1 ] || echo '  (透明代理未开启, 规则应为空)')"
+	echo
+	echo "== ip rule =="
+	ip rule show
+	echo
+	echo "== ip route show table 256 =="
+	ip route show table 256 2>&1 | grep . ||
+		echo "(表 256 为空 —— tproxy.sh start 未执行或规则已被移除)"
+	echo
+	echo "== nft table inet clash =="
+	nft list table inet clash 2> /dev/null ||
+		echo "(表 inet clash 不存在 —— 透明代理未开启, 或 clash.nft 加载失败)"
+	return 0
 }
 
 reload_service() {
-        stop
-        start
+	stop
+	start
 }
 
 service_triggers() {
-        local ifaces
-        config_load "$NAME"
-        config_get ifaces "main" "ifaces"
-        procd_open_trigger
-        for iface in $ifaces; do
-                procd_add_interface_trigger "interface.*.up" $iface /etc/init.d/$NAME restart
-        done
-        procd_close_trigger
-        procd_add_reload_trigger "$NAME"
+	local ifaces
+	config_load "$NAME"
+	config_get ifaces "main" "ifaces"
+	procd_open_trigger
+	for iface in $ifaces; do
+		procd_add_interface_trigger "interface.*.up" $iface /etc/init.d/$NAME restart
+	done
+	procd_close_trigger
+	procd_add_reload_trigger "$NAME"
 }
