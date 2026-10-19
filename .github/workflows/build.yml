@@ -202,10 +202,21 @@ jobs:
           cat packages_ci.sec >> "$GITHUB_ENV"
           echo "$EOF" >> "$GITHUB_ENV"
 
-      # 用官方 gh-action-sdk 容器编译：SDK 由镜像自带（按 ARCH 选 tag），
-      # 宿主机不再下载 SDK、也不再需要手装 build-essential / pyelftools 那一套。
+      # 用官方 SDK 镜像编译：SDK 由镜像自带（按 ARCH 选 tag），宿主机不再下载
+      # SDK、也不需要 build-essential / pyelftools 那一套。
       #
-      # 一次动作只能编一个 ARCH，所以两个架构各一个 step；产物按 ARCH 分目录，
+      # 为什么不用 openwrt/gh-action-sdk 这个 composite action：
+      #   它在 `docker run` 里对 --env 做了白名单（build / feedname / packages /
+      #   v / index / key_build ...），**FIXUP 不在名单里**，而 entrypoint 会跑
+      #   `make package/<pkg>/check`，然后用 grep 直接匹配日志里的
+      #   "HASH uses deprecated hash," 并 exit 1。本包有意用 `HASH:=skip`
+      #   （geo 数据与上游 tag tarball 都不该钉死校验和），在 SDK 25.12 上必然
+      #   命中这条 —— 传不进 FIXUP 就只能把 checksum 写死再周期性失效。
+      #   所以这里直接 docker run 官方镜像 + 官方 entrypoint，自己控制 --env，
+      #   带上 FIXUP=1 让 fixup-makefile.pl 在容器内把 hash 就地补全（只改
+      #   /feed 里的工作区副本，不会提交）。
+      #
+      # 一次只能编一个 ARCH，所以两个架构各一个 step；产物按 ARCH 分目录，
       # 后面 Collect 步骤统一收拢。
       #
       # entrypoint 在 PACKAGES 非空时会先跑 `make package/<pkg>/download` 再
@@ -215,13 +226,23 @@ jobs:
       # INDEX: '1' 让容器里用 apk mkndx + adbdump 现建一次索引，等于用设备/
       # ImageBuilder 的同一套 apk-tools 校验产物能不能被索引，拦在发布之前。
       # 两个架构各用一个独立的 ARTIFACTS_DIR：动作结束时是 `mv bin/ /artifacts/`，
-      # 若两次都指向同一个目录，第二次会变成 bin/bin 嵌套。目录必须先存在 ——
-      # 动作开头有 `sudo chown -R 1000:1000 <artifacts_dir>`，路径不存在会直接失败。
+      # 若两次都指向同一个目录，第二次会变成 bin/bin 嵌套。目录必须先存在。
       - name: Prepare artifact dirs
         run: mkdir -p "$GITHUB_WORKSPACE/artifacts/x86_64" "$GITHUB_WORKSPACE/artifacts/aarch64_generic"
 
+      # entrypoint 从 gh-action-sdk 的同一个 commit 取，行为与用 action 时一致；
+      # 钉 SHA 是为了不让上游改动悄悄改变构建语义。
+      - name: Fetch SDK entrypoint
+        env:
+          SDK_ACTION_SHA: '7fc2640243284ecc44f4a9c3f749a61746ee02cb'
+        run: |
+          set -eu
+          curl -fsSL --retry 3 \
+            "https://raw.githubusercontent.com/openwrt/gh-action-sdk/${SDK_ACTION_SHA}/entrypoint.sh" \
+            -o "${RUNNER_TEMP}/sdk-entrypoint.sh"
+          chmod +x "${RUNNER_TEMP}/sdk-entrypoint.sh"
+
       - name: Build APKs (x86_64)
-        uses: openwrt/gh-action-sdk@v11
         env:
           ARCH: x86_64-${{ env.OPENWRT_VERSION }}
           FEEDNAME: ${{ env.SDK_FEEDNAME }}
@@ -230,9 +251,9 @@ jobs:
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/x86_64
           V: s
           INDEX: '1'
+        run: bash .ci/build-in-sdk.sh
 
       - name: Build APKs (aarch64_generic)
-        uses: openwrt/gh-action-sdk@v11
         env:
           ARCH: aarch64_generic-${{ env.OPENWRT_VERSION }}
           FEEDNAME: ${{ env.SDK_FEEDNAME }}
@@ -241,6 +262,7 @@ jobs:
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/aarch64_generic
           V: s
           INDEX: '1'
+        run: bash .ci/build-in-sdk.sh
 
       - name: Collect APKs
         run: |
