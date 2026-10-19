@@ -1,10 +1,16 @@
 name: 每周检查 mihomo 上游版本
 
 # 触发方式：
-#   1. 定时 —— 每周一 02:00 UTC（北京时间 10:00）探测一次 MetaCubeX/mihomo 的最新
-#      正式版（draft / prerelease 不计入）。
+#   1. 定时 —— 每周一探测一次 MetaCubeX/mihomo 的最新正式版（draft / prerelease
+#      不计入），周四再兜底探测一次。
 #   2. 手动 —— Actions 页面 "Run workflow"，用于立即补跑；上游没有新版本时勾选
 #      force 可强制重新构建当前版本（等价于到 build.yml 手动跑一次 force）。
+#
+# 为什么要两条 cron、且都不在整点：
+#   GitHub 文档明确写着 schedule 事件在整点高负载时「排队的任务可能被丢弃」，
+#   建议错开整点。本 workflow 首版写的是 `0 2 * * 1`，2026-10-19 那次 02:00 UTC
+#   就被直接丢了 —— 一次 run 都没产生（不是失败，是根本没派发）。所以主探测挪到
+#   02:17 UTC，另外加一条周四的兜底；脚本本身幂等，没有新版本就空跑退出。
 #
 # 逻辑：
 #   上游版本 > Makefile 的 PKG_VERSION 时，改写 mihomo/Makefile：
@@ -19,8 +25,10 @@ name: 每周检查 mihomo 上游版本
 
 on:
   schedule:
-    # 每周一 02:00 UTC = 北京时间 10:00
-    - cron: '0 2 * * 1'
+    # 主探测：每周一 02:17 UTC = 北京时间 10:17。刻意错开整点（GitHub 整点丢事件）。
+    - cron: '17 2 * * 1'
+    # 兜底：每周四 18:47 UTC = 北京时间周五 02:47。周一那次若又被丢，这里补上。
+    - cron: '47 18 * * 4'
   workflow_dispatch:
     inputs:
       force:
