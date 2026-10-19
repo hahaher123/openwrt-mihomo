@@ -48,5 +48,9 @@ docker run --rm \
 	--entrypoint /entrypoint.sh \
 	"ghcr.io/openwrt/sdk:${ARCH}"
 
-# 产物归还原主，否则后面的 upload-artifact / cp 可能因属主不同失败。
-sudo chown -R --reference="${FEED_DIR}/.." "${FEED_DIR}" "${ARTIFACTS_DIR}" 2>/dev/null || true
+# 产物归还原主：容器内以 root 编译，产物属主是 root；后面的 git 操作会报
+# dubious ownership，upload-artifact 也可能读不到。
+# 不用 || true 静默吞掉 —— 失败要留下可见的 annotation，但不中断构建（产物本身没问题）。
+if ! sudo chown -R --reference="${FEED_DIR}/.." "${FEED_DIR}" "${ARTIFACTS_DIR}" 2>/dev/null; then
+	echo "::warning::产物归还原主失败；若后续 upload-artifact 报读不到文件，请检查属主"
+fi
