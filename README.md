@@ -8,7 +8,6 @@
 openwrt-mihomo/
 ├── mihomo/            # mihomo 包：/usr/bin/mihomo、/etc/init.d/mihomo、/etc/config/mihomo
 │                      #             /etc/mihomo/example.yaml 与 Country.mmdb（打包时自动下载）
-│                      #             geoip.dat / geosite.dat 不再随包发布，见「地理数据库」
 └── luci-app-mihomo/   # LuCI 管理界面（依赖 mihomo 包，编译时自动先编译 mihomo）
                        # 另随装 /etc/mihomo/config.sh    （「配置文件」页的导入/更新辅助脚本）
                        #       /etc/mihomo/autoupdate.sh（定时更新的计划任务管理脚本）
@@ -30,27 +29,9 @@ $ apk add --allow-untrusted mihomo-1.19.31-r2_x86_64.apk luci-app-mihomo-1.0.3-r
 
 APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依赖；luci-app-mihomo 与架构无关（文件名不带架构后缀），两个架构通用。全部版本见 [Releases](https://github.com/hahaher123/openwrt-mihomo/releases)。
 
-## 地理数据库
+## Country.mmdb
 
-| 文件 | 落点 | 随包发布 | 谁更新 |
-| --- | --- | --- | --- |
-| `Country.mmdb` | `/etc/mihomo/Country.mmdb` | 是（打包时从 `Loyalsoldier/geoip` 下载） | mihomo 自己（`geo-auto-update`） |
-| `geoip.dat` | `/usr/share/v2ray/geoip.dat` | 否 | oxidns |
-| `geosite.dat` | `/usr/share/v2ray/geosite.dat` | 否 | oxidns |
-
-`geodata-mode: false`（推荐值）时 GEOIP 规则读的是 `Country.mmdb`，两个 `.dat` 根本不会被打开，
-所以它们不再进这个包 —— 统一由 `v2ray-geoip` / `v2ray-geosite` 提供在 `/usr/share/v2ray/`，
-刷新交给 oxidns 的 download 插件。这两个包是本包的**硬依赖**，安装 mihomo 时由 apk 自动拉取。
-mihomo 读 dat 的路径写死在 workdir 里、没有配置项，所以**包在安装时建好软链接**，
-把这两个名字定位到共享库：
-
-```
-/etc/mihomo/geoip.dat   -> /usr/share/v2ray/geoip.dat
-/etc/mihomo/geosite.dat -> /usr/share/v2ray/geosite.dat
-```
-
-链接自安装起就有效；`geodata-mode: false` 下这两个文件不被读取，只有真正写 `GEOSITE` /
-`GEOIP(dat)` 规则时才需要它们。
+`/etc/mihomo/Country.mmdb` 在打包时从 [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip) 下载并随包发布，安装即含，无需首次运行在线下载；之后由 mihomo 自己按 `geo-auto-update` 更新。`geodata-mode: false`（默认）时 GEOIP 规则读的就是它。
 
 ## LuCI 界面
 

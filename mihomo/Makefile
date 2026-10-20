@@ -40,7 +40,7 @@ include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 #   * the shared copies live in /usr/share/v2ray and are maintained by
 #     oxidns (its download plugin refreshes them on a schedule), so this
 #     package must not own or overwrite them.
-# Keep mihomo on the mmdb side only; see README "地理数据库".
+# Keep mihomo on the mmdb side only; see README "Country.mmdb".
 define Download/country-mmdb
   FILE:=Country.mmdb
   URL:=https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release
