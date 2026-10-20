@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mihomo
 PKG_VERSION:=1.19.32
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/MetaCubeX/mihomo/tar.gz/v$(PKG_VERSION)?
@@ -56,7 +56,11 @@ define Package/mihomo
   SUBMENU:=Web Servers/Proxies
   TITLE:=A rule-based tunnel in Go
   URL:=https://github.com/MetaCubeX/mihomo
-  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun +kmod-inet-diag +kmod-netlink-diag
+  # v2ray-geoip / v2ray-geosite own /usr/share/v2ray/{geoip.dat,geosite.dat}.
+  # /etc/mihomo/{geoip.dat,geosite.dat} are symlinks into that directory
+  # (created in Package/mihomo/install), so the targets must exist on the
+  # system. oxidns refreshes them; this package only consumes them.
+  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun +kmod-inet-diag +kmod-netlink-diag +v2ray-geoip +v2ray-geosite
 endef
 
 define Package/mihomo/description

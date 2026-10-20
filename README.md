@@ -39,17 +39,18 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 | `geosite.dat` | `/usr/share/v2ray/geosite.dat` | 否 | oxidns |
 
 `geodata-mode: false`（推荐值）时 GEOIP 规则读的是 `Country.mmdb`，两个 `.dat` 根本不会被打开，
-所以它们不再进这个包 —— 统一由镜像的 `v2ray-geoip` / `v2ray-geosite` 提供在 `/usr/share/v2ray/`，
-刷新交给 oxidns 的 download 插件。mihomo 读 dat 的路径写死在 workdir 里、没有配置项，所以
-**包在安装时建好软链接**，把这两个名字定位到共享库：
+所以它们不再进这个包 —— 统一由 `v2ray-geoip` / `v2ray-geosite` 提供在 `/usr/share/v2ray/`，
+刷新交给 oxidns 的 download 插件。这两个包是本包的**硬依赖**，安装 mihomo 时由 apk 自动拉取。
+mihomo 读 dat 的路径写死在 workdir 里、没有配置项，所以**包在安装时建好软链接**，
+把这两个名字定位到共享库：
 
 ```
 /etc/mihomo/geoip.dat   -> /usr/share/v2ray/geoip.dat
 /etc/mihomo/geosite.dat -> /usr/share/v2ray/geosite.dat
 ```
 
-单独安装 mihomo 而没有装 `v2ray-geo*` 时链接会悬空；`geodata-mode: false` 下这两个文件不被读取，
-不影响启动，只有真正写 `GEOSITE` / `GEOIP(dat)` 规则时才需要它们。
+链接自安装起就有效；`geodata-mode: false` 下这两个文件不被读取，只有真正写 `GEOSITE` /
+`GEOIP(dat)` 规则时才需要它们。
 
 ## LuCI 界面
 
