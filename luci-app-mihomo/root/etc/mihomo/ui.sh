@@ -366,14 +366,17 @@ ui_install_main() {
 
 # 读任务状态一律用 read 内建, 不用 cat: status 是页面每 3 秒轮询一次的
 # 热路径, 而 read 不 fork。
+# 注意 2>/dev/null 必须写在 < 前面: 重定向按从左到右生效, 反过来写的话
+# 文件不存在时 shell 先抛 "can't open ..." 到 stderr, 那时 stderr 还没被
+# 重定向, 于是每轮轮询都漏两行噪声 (ash / bash 同样)。
 job_running() {
 	st=""
 	pid=""
 
-	read -r st < "$JOB_STATE" 2>/dev/null || return 1
+	read -r st 2>/dev/null < "$JOB_STATE" || return 1
 	[ "$st" = "running" ] || return 1
 
-	read -r pid < "$JOB_PID" 2>/dev/null || return 1
+	read -r pid 2>/dev/null < "$JOB_PID" || return 1
 	[ -n "$pid" ] || return 1
 
 	kill -0 "$pid" 2>/dev/null
@@ -382,7 +385,7 @@ job_running() {
 job_state() {
 	st=""
 
-	read -r st < "$JOB_STATE" 2>/dev/null || st=""
+	read -r st 2>/dev/null < "$JOB_STATE" || st=""
 
 	case "$st" in
 		running)
@@ -491,7 +494,7 @@ do_status() {
 
 	echo "JOB: $(job_state)"
 	rc=""
-	read -r rc < "$JOB_RC" 2>/dev/null || rc=""
+	read -r rc 2>/dev/null < "$JOB_RC" || rc=""
 	echo "JOB_RC: $rc"
 	echo "JOB_LOG: $JOB_LOG"
 	echo "RESULT: ok"
