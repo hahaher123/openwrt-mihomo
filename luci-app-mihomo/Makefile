@@ -7,8 +7,8 @@ include $(TOPDIR)/rules.mk
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Leo Douglas <douglarek@gmail.com>
 
-PKG_VERSION:=1.0.3
-PKG_RELEASE:=6
+PKG_VERSION:=1.0.4
+PKG_RELEASE:=1
 
 LUCI_TITLE:=LuCI support for Mihomo
 # "+mihomo" is a hard dependency: building/installing luci-app-mihomo
@@ -22,7 +22,12 @@ LUCI_TITLE:=LuCI support for Mihomo
 #     whatever the user's system already has)
 #   - config.sh still falls back to wget, then uclient-fetch, so a system
 #     without curl keeps working for plain HTTP
-LUCI_DEPENDS:=+luci-base +mihomo +curl
+#
+# "+unzip" is for the external-ui installer (root/etc/mihomo/ui.sh): the
+# dashboard is shipped as a zip (metacubexd gh-pages). busybox usually has
+# the unzip applet disabled, and mihomo itself can only unzip the UI it
+# downloads on its own, so the package has to pull a real unzip.
+LUCI_DEPENDS:=+luci-base +mihomo +curl +unzip
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
