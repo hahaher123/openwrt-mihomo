@@ -478,7 +478,10 @@ do_status() {
 		echo "UI_STATE: installed"
 		echo "UI_FILES: $(count_files "$UI_DIR")"
 		echo "UI_SIZE: $(dir_size "$UI_DIR")"
-		echo "UI_MTIME: $(stat -c %Y "$UI_DIR" 2>/dev/null)"
+		# 用 date -r 而不是 stat -c: busybox 默认 applet 里没有 stat
+		# (本机 25.12.6 实测 "ash: stat: not found"), 配 2>/dev/null 只会
+		# 静默返回空串, 页面上那格就永远显示 "?"。
+		echo "UI_MTIME: $(date -r "$UI_DIR" +%s 2>/dev/null)"
 		if [ -f "$UI_DIR/index.html" ]; then
 			echo "UI_INDEX: yes"
 		else
