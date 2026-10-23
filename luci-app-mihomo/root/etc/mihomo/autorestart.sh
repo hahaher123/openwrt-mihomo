@@ -39,7 +39,9 @@ INIT_SERVICE="/etc/init.d/mihomo"
 BEGIN="# mihomo-restart begin -- managed by luci-app-mihomo, do not edit"
 END="# mihomo-restart end"
 LOG_TAG="mihomo-restart"
-DEFAULT_SCHEDULE="0 4 * * *"
+# 铁律: 定时任务不写整点。分钟取非 0 (23), 且与定时更新的 :17 错开,
+# 避免重启打断更新刚完成的生效流程。
+DEFAULT_SCHEDULE="23 5 * * *"
 
 die() {
 	echo "错误: $*" >&2

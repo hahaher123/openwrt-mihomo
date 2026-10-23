@@ -42,7 +42,8 @@ BEGIN="# mihomo-autoupdate begin -- managed by luci-app-mihomo, do not edit"
 END="# mihomo-autoupdate end"
 CRON_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 LOG_TAG="mihomo-autoupdate"
-DEFAULT_SCHEDULE="0 4 * * *"
+# 铁律: 定时任务不写整点, 分钟取非 0 (17)。
+DEFAULT_SCHEDULE="17 4 * * *"
 
 die() {
 	echo "错误: $*" >&2
