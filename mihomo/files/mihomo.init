@@ -6,21 +6,50 @@ START=99
 # Custom command for the LuCI "透明代理" page: /etc/init.d/mihomo tproxystatus
 # Without EXTRA_COMMANDS the rc.common dispatcher rejects the argument and
 # prints the usage text instead of running the function below.
-EXTRA_COMMANDS="tproxystatus"
-EXTRA_HELP="	tproxystatus	Show transparent proxy policy route and nft rules"
+# diag: 排障用, 一次打印二进制版本 / uci 开关 / 关键文件 / procd 状态 / 最近日志。
+EXTRA_COMMANDS="tproxystatus diag"
+EXTRA_HELP="	tproxystatus	Show transparent proxy policy route and nft rules
+	diag		Print startup diagnostics (binary, uci flags, files, procd state, log)"
 
 script=$(readlink "$initscript")
 NAME="$(basename ${script:-$initscript})"
-PROG="/usr/bin/mihomo"
+LOG_TAG="$NAME"
+# 允许用环境变量顶替二进制, 便于拿开发版/别处编译的 mihomo 直接试启动。
+PROG="${MIHOMO_BIN:-/usr/bin/mihomo}"
 
+# start_service 的结论。rc.common 的 start() 只返回最后一条命令的状态,
+# 所以失败必须靠 service_started 钩子带出去: 否则配置错误时
+# `/etc/init.d/mihomo restart` 照样返回 0, cron/脚本/LuCI 都看不出失败。
+START_RC=0
+
+# ---------------------------------------------------------------- 输出约定 --
+# say  正常进度 -> stdout。手工执行直接可见; 被 cron/脚本调用时可自行重定向。
+# err  错误     -> stderr + syslog。开机阶段 stdout 未必有去处, syslog 一定留痕。
+# warn 可疑情况 -> stderr, 不改变退出码(能用但可疑, 不该变成起不来)。
+say() { echo "$*"; }
+
+err() {
+	echo "错误: $*" >&2
+	logger -t "$LOG_TAG" "startup error: $*" 2>/dev/null
+	START_RC=1
+}
+
+warn() { echo "警告: $*" >&2; }
+
+# ---------------------------------------------------------------- 生命周期 --
 start_service() {
+	START_RC=0
 	config_load "$NAME"
 
-	local enabled user group conffile workdir ifaces
-	local log_stdout log_stderr
+	local enabled
 	config_get_bool enabled "main" "enabled" "0"
-	[ "$enabled" -eq "1" ] || return 0
+	if [ "$enabled" != "1" ]; then
+		say "mihomo 未启用 (uci $NAME.main.enabled=0), 跳过启动"
+		return 0
+	fi
 
+	local user conffile workdir ifaces transparent config_test
+	local log_stdout log_stderr
 	config_get user "main" "user" "root"
 	config_get conffile "main" "conffile" "/etc/mihomo/config.yaml"
 	config_get ifaces "main" "ifaces"
@@ -28,39 +57,109 @@ start_service() {
 	config_get_bool log_stdout "main" "log_stdout" "1"
 	config_get_bool log_stderr "main" "log_stderr" "1"
 	config_get_bool transparent "main" "transparent" "0"
+	config_get_bool config_test "main" "config_test" "1"
 
-	[ -x "$PROG" ] || {
-		echo "Error: mihomo binary $PROG not found" >&2
+	# 1) 二进制 ------------------------------------------------------------
+	if [ ! -x "$PROG" ]; then
+		err "找不到可执行文件 $PROG (检查包是否安装完整, 或用 MIHOMO_BIN 指定)"
 		return 1
-	}
-	[ -f "$conffile" ] || {
-		echo "Error: config file $conffile not found" >&2
+	fi
+	local ver
+	ver="$("$PROG" -v 2>/dev/null | sed -n '1p')"
+	say "启动 mihomo${ver:+ ($ver)}"
+	say "  配置: $conffile"
+	say "  工作目录: $workdir  用户: $user"
+
+	# 2) 配置文件 ----------------------------------------------------------
+	if [ ! -e "$conffile" ]; then
+		err "配置文件 $conffile 不存在 (uci $NAME.main.conffile)"
 		return 1
-	}
-
-	mkdir -p "$workdir"
-	local group="$(id -ng $user)"
-	chown $user:$group "$workdir"
-
-	# Transparent proxy (TPROXY): apply policy route and nft rules
-	# before mihomo starts.
-	if [ "$transparent" -eq "1" ]; then
-		[ -x /usr/sbin/nft ] || {
-			echo "Error: nft not found, transparent proxy disabled" >&2
-			return 1
-		}
-		nft delete table inet clash 2> /dev/null
-		if [ -f /etc/mihomo/clash.nft ]; then
-			nft -f /etc/mihomo/clash.nft ||
-				echo "Error: failed to load /etc/mihomo/clash.nft, transparent proxy rules NOT applied" >&2
-		fi
-		[ -f /etc/mihomo/tproxy.sh ] && sh /etc/mihomo/tproxy.sh start
-		grep -qE '^[[:space:]]*redir-port[[:space:]]*:' "$conffile" ||
-			echo "Warning: 'redir-port' not set in $conffile, TCP redirect will not work" >&2
-		grep -qE '^[[:space:]]*tproxy-port[[:space:]]*:' "$conffile" ||
-			echo "Warning: 'tproxy-port' not set in $conffile, UDP tproxy will not work" >&2
+	fi
+	if [ ! -r "$conffile" ]; then
+		err "配置文件 $conffile 不可读 (权限: $(ls -l "$conffile" 2>/dev/null))"
+		return 1
+	fi
+	if [ ! -s "$conffile" ]; then
+		err "配置文件 $conffile 是空文件"
+		return 1
 	fi
 
+	# 3) 工作目录与运行用户 ------------------------------------------------
+	if ! mkdir -p "$workdir"; then
+		err "无法创建工作目录 $workdir"
+		return 1
+	fi
+	local group
+	if ! group="$(id -ng "$user" 2>/dev/null)"; then
+		err "用户 $user 不存在 (uci $NAME.main.user), 无法确定运行身份"
+		return 1
+	fi
+	chown "$user:$group" "$workdir" 2>/dev/null ||
+		warn "无法把 $workdir 的属主改为 $user:$group (继续启动, 可能出现写缓存失败)"
+
+	# 4) 启动前配置校验 ----------------------------------------------------
+	# mihomo -t 只解析配置、不监听端口, 失败时给出行号级的错误。
+	# 不校验的话坏配置会让 procd 反复 respawn, 日志里只剩难以定位的崩溃。
+	if [ "$config_test" -eq "1" ] && [ "${MIHOMO_SKIP_CONFIG_TEST:-0}" != "1" ]; then
+		local out detail
+		out="$("$PROG" -t -f "$conffile" -d "$workdir" 2>&1)"
+		if [ $? -ne 0 ]; then
+			err "配置校验失败 ($PROG -t -f $conffile):"
+			detail="$(printf '%s\n' "$out" | grep -E 'level=(error|fatal)' | tail -n 3)"
+			[ -n "$detail" ] || detail="$(printf '%s\n' "$out" | tail -n 3)"
+			# 去掉 mihomo 自带的 time="..." 前缀, 只留 level + msg, 免得一行太长。
+			printf '%s\n' "$detail" | sed -E 's/^time="[^"]*" //' | sed 's/^/    /' >&2
+			err "已放弃启动, 以免 procd 反复重启刷日志; 改好配置后 /etc/init.d/$NAME restart"
+			echo "提示: 临时跳过校验: uci set $NAME.main.config_test=0; uci commit $NAME" >&2
+			return 1
+		fi
+		say "  配置校验: 通过"
+	else
+		warn "已跳过配置校验 (config_test=0 或 MIHOMO_SKIP_CONFIG_TEST=1)"
+	fi
+
+	# 5) 透明代理 ----------------------------------------------------------
+	# 策略路由与 nft 规则必须在 mihomo 启动前就位, 否则首包会被漏掉。
+	if [ "$transparent" -eq "1" ]; then
+		local nft_bin
+		nft_bin="$(command -v nft 2>/dev/null)"
+		if [ -z "$nft_bin" ]; then
+			err "透明代理已开启但找不到 nft, 规则无法下发 (装 kmod-nft-* 或关掉 uci $NAME.main.transparent)"
+			return 1
+		fi
+
+		"$nft_bin" delete table inet clash 2>/dev/null
+
+		if [ -f /etc/mihomo/clash.nft ]; then
+			if "$nft_bin" -f /etc/mihomo/clash.nft; then
+				say "  透明代理: nft 规则已加载 (/etc/mihomo/clash.nft)"
+			else
+				err "加载 /etc/mihomo/clash.nft 失败, 透明代理规则未生效"
+			fi
+		else
+			warn "透明代理: /etc/mihomo/clash.nft 不存在, 跳过 nft 规则"
+		fi
+
+		if [ -f /etc/mihomo/tproxy.sh ]; then
+			if sh /etc/mihomo/tproxy.sh start; then
+				say "  透明代理: 策略路由已应用 (/etc/mihomo/tproxy.sh start)"
+			else
+				warn "透明代理: tproxy.sh start 返回非零, 策略路由可能不完整 (用 tproxystatus 核对)"
+			fi
+		else
+			warn "透明代理: /etc/mihomo/tproxy.sh 不存在, 跳过策略路由"
+		fi
+
+		# 端口缺失只是功能不全(有人只用 TUN), 因此只警告不拦启动。
+		grep -qE '^[[:space:]]*redir-port[[:space:]]*:' "$conffile" ||
+			warn "透明代理: 配置里没有 redir-port, TCP 重定向不会生效"
+		grep -qE '^[[:space:]]*tproxy-port[[:space:]]*:' "$conffile" ||
+			warn "透明代理: 配置里没有 tproxy-port, UDP TPROXY 不会生效"
+	else
+		say "  透明代理: 未启用 (uci $NAME.main.transparent=0)"
+	fi
+
+	# 6) 交给 procd --------------------------------------------------------
 	procd_open_instance "$NAME.main"
 	procd_set_param command "$PROG" -f "$conffile" -d "$workdir"
 
@@ -73,13 +172,31 @@ start_service() {
 	procd_set_param respawn
 
 	procd_close_instance
+	say "  已提交 procd 实例 $NAME.main (respawn 已开启)"
+	say "  进程日志: logread -e mihomo    进程状态: /etc/init.d/$NAME status"
+	return 0
+}
+
+# rc.common 在 start 末尾调用本钩子, 其返回值就是 init 脚本的退出码。
+service_started() {
+	if [ "$START_RC" -ne 0 ]; then
+		say "启动失败 (退出码 $START_RC), 详见上面的错误行或 logread -t $LOG_TAG"
+		return "$START_RC"
+	fi
+	return 0
 }
 
 stop_service() {
 	# Remove transparent proxy rules left over from a previous run.
-	sh /etc/mihomo/tproxy.sh stop 2> /dev/null
-	nft delete table inet clash 2> /dev/null
+	[ -f /etc/mihomo/tproxy.sh ] && sh /etc/mihomo/tproxy.sh stop 2>/dev/null
+	command -v nft >/dev/null 2>&1 && nft delete table inet clash 2>/dev/null
+	say "已停止 mihomo (透明代理规则与 nft 表已清理)"
 	return 0
+}
+
+reload_service() {
+	stop
+	start
 }
 
 tproxystatus() {
@@ -102,9 +219,39 @@ tproxystatus() {
 	return 0
 }
 
-reload_service() {
-	stop
-	start
+diag() {
+	local conffile workdir
+	[ -f /etc/config/$NAME ] && config_load "$NAME"
+	config_get conffile "main" "conffile" "/etc/mihomo/config.yaml"
+	config_get workdir "main" "workdir" "/etc/mihomo"
+
+	echo "== 二进制 =="
+	if [ -x "$PROG" ]; then
+		"$PROG" -v 2>&1 | sed -n '1,2p' | sed 's/^/  /'
+	else
+		echo "  $PROG 不存在或不可执行"
+	fi
+	echo
+	echo "== uci $NAME =="
+	uci show "$NAME" 2>&1 | sed 's/^/  /'
+	echo
+	echo "== 关键文件 =="
+	local f
+	for f in "$conffile" "$workdir/cache.db" /etc/mihomo/clash.nft /etc/mihomo/tproxy.sh; do
+		if [ -e "$f" ]; then
+			echo "  $(ls -l "$f" 2>/dev/null)"
+		else
+			echo "  缺失: $f"
+		fi
+	done
+	echo
+	echo "== procd =="
+	echo "  $(/etc/init.d/$NAME status 2>&1)"
+	echo
+	echo "== 最近日志 =="
+	logread -e "$LOG_TAG" 2>/dev/null | tail -n 5 | sed 's/^/  /' ||
+		echo "  (logread 不可用)"
+	return 0
 }
 
 service_triggers() {

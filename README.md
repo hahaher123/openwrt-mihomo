@@ -46,6 +46,15 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 | 配置文件 | 列出 / 编辑 / 校验 / 切换 workdir 下的配置文件；远程导入订阅；仅更新与定时更新服务器和代理组 |
 | 后台管理 | 内嵌 external-ui 仪表盘（metacubexd / yacd 等），默认 `http://<路由器>:9090/ui` |
 
+**启动输出与排障**（`/etc/init.d/mihomo`）：
+
+- 进度走 stdout、错误走 stderr，手工执行直接可见；被脚本 / cron 调用时可自行 `2>&1 | logger -t xxx`
+- 错误同时写 syslog（标签 `mihomo`），开机阶段 stdout 无去处时也能在 `logread` 里查到
+- **启动失败返回非 0**（经 `service_started` 钩子带出，rc.common 不会再把它吃成 0），因此 `restart && 后续动作` 与 cron 判断都可信
+- 启动前用 `mihomo -t` 校验配置：失败只打印 mihomo 的错误行并放弃启动，避免 procd 反复 respawn 刷屏；临时跳过校验 `uci set mihomo.main.config_test=0`（或环境变量 `MIHOMO_SKIP_CONFIG_TEST=1`）
+- `/etc/init.d/mihomo diag`：一次打印二进制版本、uci 全部取值、关键文件（含缺失项）、procd 状态与最近日志
+- 二进制可用环境变量 `MIHOMO_BIN` 顶替，便于拿开发版试启动
+
 **配置文件页要点**：
 
 - **校验先行**：保存 / 保存并重启 / 远程导入都先用 `mihomo -t` 校验（参数与服务启动一致，在 `/tmp` 进行），不通过不写盘；配置文件权限 `0600`（含订阅凭据）
