@@ -16,6 +16,8 @@ openwrt-mihomo/
                        #       /etc/mihomo/clash.nft    （透明代理的 nft 规则，独立表 inet clash）
 ```
 
+`.ci/prune-releases.sh` 是发版后裁剪旧 Release 的脚本（只保留最新 5 个），由 `build.yml` 自动调用。
+
 面向 OpenWrt 25 的原生 mihomo 构建（APK 包格式），自带 procd init 脚本与 uci 配置；打包时自动下载 [Loyalsoldier](https://github.com/Loyalsoldier/geoip) 的 `Country.mmdb`，安装即含，无需首次运行在线下载。
 
 ## 安装
@@ -112,8 +114,9 @@ make package/luci-app-mihomo/compile V=s           # 硬依赖 +mihomo，自动�
 
 推送 main 且**任一 Makefile 的版本号**（`PKG_VERSION` / `PKG_RELEASE`）变化时，自动构建并发布 Release（按 tag 判重，同版本不重复构建）；也可在 [Actions → Build and release Mihomo APK](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/build.yml) 手动 Run workflow 重跑（勾选 force 可在版本未变时强制重建并覆盖资产）。产物含 x86_64 与 aarch64_generic 两个架构。
 
-- **tag 规则**：`v<mihomo 版本>-r<修订>-luci<LuCI 版本>-r<修订>`，当前对应 `v1.19.31-r2-luci1.0.3-r5`
+- **tag 规则**：`v<mihomo 版本>-r<修订>-luci<LuCI 版本>-r<修订>`，当前对应 `v1.19.33-r3-luci1.0.5-r2`
 - **版本号约定**：修 bug / 调整已安装文件只升 `PKG_RELEASE`；新增功能或跟进上游版本升 `PKG_VERSION` 并把 `PKG_RELEASE` 重置为 `1`；只改文档或 CI 不动版本号
-- **上游自动跟进**：每周一 10:00（北京时间）探测 MetaCubeX/mihomo 的最新正式版，高于当前 `PKG_VERSION` 时自动升版本、推送并触发构建发布
+- **Release 保留策略**：只保留最新 **5** 个 Release，更旧的连同其 APK 资产自动删除（git tag 保留，故历史版本仍可追溯、可按 tag 自行构建）。清理由每次发版后自动执行，无需人工干预；需要单独补跑时用 [Actions → Prune old releases](https://github.com/hahaher123/openwrt-mihomo/actions/workflows/prune-releases.yml)（不触发构建，可指定保留数量）
+- **上游自动跟进**：每周一 10:17（北京时间）探测 MetaCubeX/mihomo 的最新正式版，高于当前 `PKG_VERSION` 时自动升版本、推送并触发构建发布
 
 上游原版构建产物见 [douglarek/vanilla-mihomo releases](https://github.com/douglarek/vanilla-mihomo/releases)。

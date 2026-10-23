@@ -1,0 +1,42 @@
+name: Prune old releases
+
+# 只保留最新若干个 Release（默认 5），更旧的 Release 及其资产删除；git tag 一律保留。
+#
+# 日常无需运行：build.yml 每次发版成功后会自动执行同一个脚本（.ci/prune-releases.sh）。
+# 本工作流仅用于「不重新构建、只清一次」的场合，例如首次清理历史积压、或临时调整
+# 保留数量。不做任何编译，几十秒结束。
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: '保留最新多少个 Release'
+        required: false
+        type: string
+        default: '5'
+
+permissions:
+  contents: write
+
+# 与 build.yml 里的清理可能同时发生，但脚本幂等（只删超限的），并发不会误删新版本。
+concurrency:
+  group: prune-releases
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune releases
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source tree
+        uses: actions/checkout@v6
+        with:
+          # 只需要 .ci/prune-releases.sh，不拉历史
+          sparse-checkout: .ci
+          sparse-checkout-cone-mode: false
+
+      - name: Prune old releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RELEASES: ${{ inputs.keep }}
+        run: bash .ci/prune-releases.sh

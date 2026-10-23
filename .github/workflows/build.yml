@@ -10,7 +10,8 @@ name: Build and release Mihomo APK
 #      勾选 force 可在版本没变时也强制重建并覆盖资产。
 #
 # 一次构建 x86_64 / aarch64_generic 两个架构的 APK（含 mihomo 与 luci-app-mihomo
-# 两个包），按两个 Makefile 中的当前版本打 tag 并发布 Release。
+# 两个包），按两个 Makefile 中的当前版本打 tag 并发布 Release；发布后自动裁剪旧
+# Release，只保留最新 5 个（.ci/prune-releases.sh，git tag 一律保留）。
 on:
   push:
     branches:
@@ -398,3 +399,13 @@ jobs:
           fi
 
           echo "release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+      # 发布完自动清理旧 Release：只保留最新 5 个（脚本幂等，数量不超上限时空跑）。
+      # 在 build 里做而不是单独一个 workflow，是为了「发完顺手清」——不依赖任何
+      # 外部定时器，也不需要人工干预。单独补跑见 prune-releases.yml。
+      # ⚠ 必须放在 Release 创建/更新之后：它会按 created_at 倒序裁掉尾部。
+      - name: Prune old releases (keep newest 5)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RELEASES: '5'
+        run: bash .ci/prune-releases.sh
