@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mihomo
 PKG_VERSION:=1.19.33
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/MetaCubeX/mihomo/tar.gz/v$(PKG_VERSION)?
@@ -56,11 +56,10 @@ define Package/mihomo
   SUBMENU:=Web Servers/Proxies
   TITLE:=A rule-based tunnel in Go
   URL:=https://github.com/MetaCubeX/mihomo
-  # v2ray-geoip / v2ray-geosite own /usr/share/v2ray/{geoip.dat,geosite.dat}.
-  # /etc/mihomo/{geoip.dat,geosite.dat} are symlinks into that directory
-  # (created in Package/mihomo/install), so the targets must exist on the
-  # system. oxidns refreshes them; this package only consumes them.
-  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun +kmod-inet-diag +kmod-netlink-diag +v2ray-geoip +v2ray-geosite
+  # /usr/share/v2ray/{geoip.dat,geosite.dat} 不再由 v2ray-geoip / v2ray-geosite
+  # 提供：整机镜像里它们是 FILES 覆盖层的一部分（构建时从 Loyalsoldier 下载），
+  # 由 oxidns 负责刷新，本包只通过软链接消费（见 Package/mihomo/install）。
+  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun +kmod-inet-diag +kmod-netlink-diag
 endef
 
 define Package/mihomo/description
@@ -91,8 +90,8 @@ define Package/mihomo/install
 	$(INSTALL_DATA) $(DL_DIR)/Country.mmdb $(1)/etc/mihomo/Country.mmdb
 
 	# geoip.dat / geosite.dat 不再随包发布（见文件头的 Download/country-mmdb 注释），
-	# 装的是指向共享库的软链接：/usr/share/v2ray/ 由镜像的 v2ray-geoip /
-	# v2ray-geosite 两个包提供，内容与刷新由 oxidns 负责（mihomo 不参与更新）。
+	# 装的是指向共享库的软链接：/usr/share/v2ray/ 由整机镜像的 FILES 覆盖层提供
+	# （构建时从 Loyalsoldier 下载），内容与刷新由 oxidns 负责（mihomo 不参与更新）。
 	# mihomo 读 dat 的路径写死在 workdir 里、没有配置项，所以只能用链接把
 	# 「/etc/mihomo/geoip.dat」这个名字定位过去。geodata-mode: false（默认）时
 	# 这两个名字根本不会被打开，链接悬空也不影响启动。
