@@ -54,8 +54,11 @@ start_service() {
 	config_get conffile "main" "conffile" "/etc/mihomo/config.yaml"
 	config_get ifaces "main" "ifaces"
 	config_get workdir "main" "workdir" "/etc/mihomo"
-	config_get_bool log_stdout "main" "log_stdout" "1"
-	config_get_bool log_stderr "main" "log_stderr" "1"
+	# 默认不把 mihomo 的 stdout/stderr 转发进系统日志: mihomo 每个连接都打一行
+	# info 日志, 转发会把 logread 刷满、还加速 logd 轮转。排障时临时打开:
+	#   uci set mihomo.main.log_stdout=1; uci commit mihomo; /etc/init.d/mihomo restart
+	config_get_bool log_stdout "main" "log_stdout" "0"
+	config_get_bool log_stderr "main" "log_stderr" "0"
 	config_get_bool transparent "main" "transparent" "0"
 	config_get_bool config_test "main" "config_test" "1"
 
@@ -173,7 +176,13 @@ start_service() {
 
 	procd_close_instance
 	say "  已提交 procd 实例 $NAME.main (respawn 已开启)"
-	say "  进程日志: logread -e mihomo    进程状态: /etc/init.d/$NAME status"
+	if [ "$log_stdout" = "1" ] || [ "$log_stderr" = "1" ]; then
+		say "  进程日志: logread -e mihomo    进程状态: /etc/init.d/$NAME status"
+	else
+		say "  进程日志: 未写入系统日志 (log_stdout/log_stderr=0)    进程状态: /etc/init.d/$NAME status"
+		say "            mihomo 自身日志不再进 logread; 排障需要时打开:"
+		say "            uci set $NAME.main.log_stdout=1; uci commit $NAME; /etc/init.d/$NAME restart"
+	fi
 	return 0
 }
 

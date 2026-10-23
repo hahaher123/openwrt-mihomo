@@ -52,6 +52,7 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 
 - 进度走 stdout、错误走 stderr，手工执行直接可见；被脚本 / cron 调用时可自行 `2>&1 | logger -t xxx`
 - 错误同时写 syslog（标签 `mihomo`），开机阶段 stdout 无去处时也能在 `logread` 里查到
+- **mihomo 进程自身的 stdout/stderr 默认不写入系统日志**（`log_stdout`/`log_stderr` 默认 0）：mihomo 每个连接都打一行 info 日志，转发会刷满 `logread`。排障时临时打开：`uci set mihomo.main.log_stdout=1; uci commit mihomo; /etc/init.d/mihomo restart`；运行中日志也可用仪表盘的 Logs 页实时查看
 - **启动失败返回非 0**（经 `service_started` 钩子带出，rc.common 不会再把它吃成 0），因此 `restart && 后续动作` 与 cron 判断都可信
 - 启动前用 `mihomo -t` 校验配置：失败只打印 mihomo 的错误行并放弃启动，避免 procd 反复 respawn 刷屏；临时跳过校验 `uci set mihomo.main.config_test=0`（或环境变量 `MIHOMO_SKIP_CONFIG_TEST=1`）
 - `/etc/init.d/mihomo diag`：一次打印二进制版本、uci 全部取值、关键文件（含缺失项）、procd 状态与最近日志
