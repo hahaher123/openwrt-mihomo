@@ -37,6 +37,7 @@
 var MIHOMO_BIN = '/usr/bin/mihomo';
 var HELPER = '/etc/mihomo/config.sh';
 var AUTOUPDATE = '/etc/mihomo/autoupdate.sh';
+var AUTORESTART = '/etc/mihomo/autorestart.sh';
 var CHECK_FILE = '/tmp/mihomo-config-check.yaml';
 
 // 编辑区里的整份内容先一小块一小块追加到 STAGE_PREFIX 开头的暂存文件, 再由
@@ -77,6 +78,19 @@ var AUTO_SCHEDULES = [
 	[ '0 */12 * * *', '每 12 小时' ],
 	[ '0 4 * * *',    '每天 04:00' ],
 	[ '0 4 * * 1',    '每周一 04:00' ],
+	[ 'custom',       '自定义 cron 表达式' ]
+];
+
+// 定时重启的执行时间选项: [cron 表达式, 说明]。最后一项是自定义。
+// 与 AUTO_SCHEDULES 分开: 重启的常用档位偏「低频 + 低峰时段」。
+var RESTART_DEFAULT_SCHEDULE = '0 4 * * *';
+
+var RESTART_SCHEDULES = [
+	[ '0 3 * * *',    '每天 03:00' ],
+	[ '0 4 * * *',    '每天 04:00' ],
+	[ '0 5 * * *',    '每天 05:00' ],
+	[ '0 */12 * * *', '每 12 小时' ],
+	[ '30 4 * * 1',   '每周一 04:30' ],
 	[ 'custom',       '自定义 cron 表达式' ]
 ];
 
@@ -905,6 +919,114 @@ return view.extend({
 		return this.handleAutoSave(ev);
 	},
 
+	// ---------------- 定时重启服务 (uci mihomo.autorestart + autorestart.sh) ----------------
+
+	// 与定时更新同一套约定: uci 只读不写, 写由 autorestart.sh set 用命令行
+	// uci 完成 (避开 ubus 提交带来的服务 reload, 详见该脚本的说明)。
+	// 键名必须与脚本一致 (enabled / schedule)。
+	restartSettings: function() {
+		return {
+			enabled:  uci.get_first('mihomo', 'autorestart', 'enabled') == '1',
+			schedule: uci.get_first('mihomo', 'autorestart', 'schedule') || RESTART_DEFAULT_SCHEDULE
+		};
+	},
+
+	// 用 uci 里的值初始化表单
+	applyRestartSettings: function() {
+		var s = this.restartSettings();
+		var known = false;
+
+		this.rsEnabled.checked = s.enabled;
+
+		for (var i = 0; i < RESTART_SCHEDULES.length; i++) {
+			if (RESTART_SCHEDULES[i][0] == s.schedule) {
+				this.rsFreq.value = s.schedule;
+				known = true;
+				break;
+			}
+		}
+
+		if (!known) {
+			this.rsFreq.value = 'custom';
+			this.rsCron.value = s.schedule;
+		}
+
+		this.restartScheduleSync();
+
+		return Promise.resolve();
+	},
+
+	// 「重启频率」选到自定义时展开 cron 输入框, 否则把选中的表达式写进去
+	restartScheduleSync: function() {
+		var custom = (this.rsFreq.value == 'custom');
+
+		this.rsCron.style.display = custom ? 'inline-block' : 'none';
+
+		if (!custom)
+			this.rsCron.value = this.rsFreq.value;
+
+		return Promise.resolve();
+	},
+
+	handleRestartFreq: function(ev) {
+		return this.restartScheduleSync();
+	},
+
+	refreshRestartStatus: function() {
+		var self = this;
+
+		return fs.exec(AUTORESTART, [ 'status' ]).then(function(res) {
+			if (self.rsStatusPre)
+				self.rsStatusPre.textContent = joinOutput(res) || _('(无输出)');
+		}, function(e) {
+			if (self.rsStatusPre)
+				self.rsStatusPre.textContent = String(e.message || e);
+		});
+	},
+
+	handleRestartStatus: function(ev) {
+		return this.refreshRestartStatus();
+	},
+
+	handleRestartSave: function(ev) {
+		var self = this;
+		var enabled = !!this.rsEnabled.checked;
+		var freq = String(this.rsFreq.value || '');
+		var schedule = (freq == 'custom') ? String(this.rsCron.value || '').trim() : freq;
+
+		if (enabled && !this.validSchedule(schedule)) {
+			this.setResult('warn', _('执行时间不合法'),
+				_('需要 5 段 (分 时 日 月 周), 只能使用 0-9 * / , - 与空格, 例如 %s。当前值: %s')
+					.format(RESTART_DEFAULT_SCHEDULE, schedule || '(空)'));
+			return Promise.resolve();
+		}
+
+		// 同定时更新: 写 uci 与落计划任务都由 autorestart.sh 完成, 不走 rpcd 的
+		// uci.apply, 避免只改一个定时设置就把代理重启一次。
+		this.setResult('info', _('正在保存定时重启设置…'), '', true);
+
+		return fs.exec(AUTORESTART, [ 'set', enabled ? '1' : '0', schedule ])
+			.then(function(res) {
+				var ok = (res && res.code == 0);
+				var out = joinOutput(res) || _('(无输出)');
+
+				self.setResult(ok ? 'ok' : 'err',
+					ok ? (enabled ? _('定时重启已启用') : _('定时重启已关闭'))
+					   : _('定时重启设置未保存 (退出码 %s)').format(res ? res.code : '?'),
+					out);
+
+				return self.refreshRestartStatus();
+			}, function(e) {
+				self.setResult('err', _('保存定时重启设置失败'), String(e.message || e));
+			});
+	},
+
+	handleRestartRemove: function(ev) {
+		this.rsEnabled.checked = false;
+
+		return this.handleRestartSave(ev);
+	},
+
 	// ---------------- 生命周期 ----------------
 
 	load: function() {
@@ -1024,6 +1146,26 @@ return view.extend({
 			'style': 'margin:10px 0 0 0; padding:10px; max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:6px; font-size:0.9em; color:#333;'
 		}, [ _('尚未读取定时更新状态') ]);
 
+		// ---- 定时重启表单 (结构与定时更新一致, 少目标配置与链接两项) ----
+		this.rsEnabled = E('input', { 'type': 'checkbox' }, []);
+
+		this.rsFreq = E('select', {
+			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff;',
+			'change': ui.createHandlerFn(self, 'handleRestartFreq')
+		}, RESTART_SCHEDULES.map(function(item) {
+			return E('option', { 'value': item[0] }, [ _(item[1]) ]);
+		}));
+
+		this.rsCron = E('input', {
+			'type': 'text',
+			'placeholder': RESTART_DEFAULT_SCHEDULE,
+			'style': 'display:none; width:200px; padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; font-family:monospace;'
+		}, []);
+
+		this.rsStatusPre = E('pre', {
+			'style': 'margin:10px 0 0 0; padding:10px; max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:6px; font-size:0.9em; color:#333;'
+		}, [ _('尚未读取定时重启状态') ]);
+
 		var btn = function(label, handler, cls) {
 			return E('button', {
 				'class': 'btn cbi-button ' + (cls || 'cbi-button-apply'),
@@ -1122,6 +1264,27 @@ return view.extend({
 			]),
 			this.autoStatusPre,
 
+			E('h3', {}, [ _('定时重启服务') ]),
+			E('div', { 'class': 'cbi-map-descr' }, [
+				_('启用后会在设定的低峰时段 (cron 计划任务) 重启 mihomo 服务, 释放长时间运行积累的连接状态与内存。重启过程约为几秒的代理中断, 定时更新、面板等其它设置不受影响。'),
+				E('br'),
+				_('计划任务写在 /etc/crontabs/root 里由本页面管理的标记块中, 你自己添加的其它计划任务 (以及「定时更新」的任务) 不受影响。')
+			]),
+			E('div', { 'style': 'display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:10px 0;' }, [
+				E('label', { 'style': 'display:flex; align-items:center; gap:6px; color:#555;' }, [
+					this.rsEnabled, _('启用定时重启')
+				]),
+				E('label', { 'style': 'display:flex; align-items:center; gap:6px; color:#555;' }, [
+					_('重启频率'), this.rsFreq, this.rsCron
+				])
+			]),
+			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap;' }, [
+				btn(_('保存定时重启设置'), 'handleRestartSave'),
+				btn(_('关闭定时重启'), 'handleRestartRemove', 'cbi-button'),
+				btn(_('刷新状态'), 'handleRestartStatus', 'cbi-button')
+			]),
+			this.rsStatusPre,
+
 			E('h3', {}, [ _('编辑选中的配置文件') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [ _('正在编辑: '), this.editPath ]),
 			this.ta,
@@ -1136,6 +1299,8 @@ return view.extend({
 		this.syncSourceField(true);
 		this.applyAutoSettings();
 		this.refreshAutoStatus();
+		this.applyRestartSettings();
+		this.refreshRestartStatus();
 
 		if (data.error)
 			this.setResult('err', _('读取目录 %s 失败').format(c.workdir), data.error, true);

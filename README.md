@@ -11,6 +11,7 @@ openwrt-mihomo/
 └── luci-app-mihomo/   # LuCI 管理界面（依赖 mihomo 包，编译时自动先编译 mihomo）
                        # 另随装 /etc/mihomo/config.sh    （「配置文件」页的导入/更新辅助脚本）
                        #       /etc/mihomo/autoupdate.sh（定时更新的计划任务管理脚本）
+                       #       /etc/mihomo/autorestart.sh（定时重启服务的计划任务管理脚本）
                        #       /etc/mihomo/tproxy.sh    （透明代理的 fwmark 策略路由脚本）
                        #       /etc/mihomo/clash.nft    （透明代理的 nft 规则，独立表 inet clash）
 ```
@@ -50,6 +51,7 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 - **校验先行**：保存 / 保存并重启 / 远程导入都先用 `mihomo -t` 校验（参数与服务启动一致，在 `/tmp` 进行），不通过不写盘；配置文件权限 `0600`（含订阅凭据）
 - **远程导入**：下载到 `/tmp` → 校验 → 安装，任何一步失败不落盘、不覆盖同名文件；gzip / base64 订阅自动解码
 - **仅更新 / 定时更新**：按订阅重拉后只替换 `proxies` 与 `proxy-groups` 两段，其余内容原样保留；与本地一致时不写盘不重启，有变化才写入并重启服务。订阅链接记录在 `<workdir>/sources`，更新无需重填。定时更新即把同一流程挂为 cron（只写在页面管理的标记块里，不影响手工 crontab），结果写入系统日志（标签 `mihomo-autoupdate`）
+- **定时重启服务**：低峰时段自动 `restart` mihomo（释放连接状态与内存），同一套 cron 标记块机制，不影响手工 crontab 与定时更新任务
 
 > [!NOTE]
 > 导入 / 更新依赖路由器能直连订阅地址；若订阅需经代理访问，请先配置好网络出口。下载优先用 `curl`（超时与重试内置），失败原因会归纳为一句中文提示；若返回的是网页或 `ss:// vmess://` 节点列表，请改用机场的 Clash 订阅地址（常见做法是链接后加 `&flag=clash`）。
