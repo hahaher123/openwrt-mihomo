@@ -43,58 +43,178 @@ function getVersion() {
 	});
 }
 
-function getLog() {
-	return L.resolveDefault(fs.exec('/sbin/logread', [ '-l', '50', '-e', 'mihomo' ]), null).then(function(res) {
-		var raw = (res && res.stdout && res.stdout.trim()) ? res.stdout.trim() : null;
-		if (!raw)
+/* -- 运行日志 ---------------------------------------------------------------
+ * 数据源是落盘文件 (uci mihomo.main.log_file), 不是 logread: 系统日志是环形
+ * 缓冲、会被别的守护进程挤掉、重启即清空, 而且本包默认就不把 mihomo 的进程
+ * 输出转发进 syslog。读写都走 /etc/mihomo/log.sh, 好处是不用为可配置的日志路径
+ * 在 ACL 里写 file 授权 (rpcd 会对 realpath 后的路径再查一次 ACL, /var -> /tmp
+ * 的符号链接很容易踩空), exec 一个固定路径最稳。
+ */
+var LOG_HELPER = '/etc/mihomo/log.sh';
+var LOG_TAIL_LINES = 200;
+var LOG_MAX_MIN = 16;
+var LOG_MAX_MAX = 102400;
+
+function logExec(args) {
+	return L.resolveDefault(fs.exec(LOG_HELPER, args), null).then(function(res) {
+		return res || { code: -1, stdout: '', stderr: '' };
+	});
+}
+
+function readLogStatus() {
+	return logExec([ 'status' ]).then(function(res) {
+		if (res.code != 0)
 			return null;
 
-		return probeRouterTZ().then(function(offsetMin) {
-			return formatLogUTC8(raw, offsetMin);
+		var st = { file: '', exists: false, size: 0, max_kb: 0 };
+
+		String(res.stdout || '').split('\n').forEach(function(line) {
+			var i = line.indexOf('=');
+			if (i <= 0)
+				return;
+
+			var k = line.slice(0, i), v = line.slice(i + 1);
+
+			if (k == 'file')
+				st.file = v;
+			else if (k == 'exists')
+				st.exists = (v == '1');
+			else if (k == 'size')
+				st.size = parseInt(v, 10) || 0;
+			else if (k == 'max_kb')
+				st.max_kb = parseInt(v, 10) || 0;
 		});
+
+		return st.file ? st : null;
 	});
 }
 
-// 路由器的 UTC 偏移(分钟)。logread 的行首时间戳是「记录时刻路由器的本地时间」,
-// 要换算成东八区必须知道路由器自己的时区。取一次缓存即可。
-var ROUTER_TZ_MIN = null;
-
-function probeRouterTZ() {
-	if (ROUTER_TZ_MIN !== null)
-		return Promise.resolve(ROUTER_TZ_MIN);
-
-	return L.resolveDefault(fs.exec('/bin/date', [ '+%z' ]), null).then(function(res) {
-		var m = (res && res.stdout) ? String(res.stdout).trim().match(/^([+-])(\d{2})(\d{2})$/) : null;
-		var sign = m ? (m[1] == '-' ? -1 : 1) : 0;
-
-		ROUTER_TZ_MIN = m ? sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10)) : 0;
-		return ROUTER_TZ_MIN;
+function readLogTail() {
+	return logExec([ 'tail', String(LOG_TAIL_LINES) ]).then(function(res) {
+		return (res.code == 0) ? String(res.stdout || '').replace(/\s+$/, '') : '';
 	});
 }
 
-// busybox logread 行首格式: "Sun Sep 20 10:14:09 2026 daemon.info ..."
-// 依此把每行时间戳从路由器本地时间改写成东八区 (UTC+8) 的
-// "YYYY-MM-DD HH:MM:SS", 行的其余部分原样保留; 解析不了的行不动。
-var LOG_MONTHS = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
-                   Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+function formatSize(bytes) {
+	var kb = Math.round(bytes / 1024 * 10) / 10;
 
-function formatLogUTC8(text, offsetMin) {
-	var pad = function(n) { return (n < 10 ? '0' : '') + n; };
+	return (kb >= 1024) ? '%s MB'.format(String(Math.round(kb / 1024 * 10) / 10))
+	                    : '%s KB'.format(String(kb));
+}
 
-	return text.split('\n').map(function(line) {
-		var m = line.match(/^[A-Z][a-z]{2} ([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})\s(.*)$/);
-		if (!m || !(m[1] in LOG_MONTHS))
-			return line;
+// 日志面板: 返回 { node, refresh }。refresh 由调用方在节点挂载后调用
+// (页面轮询与操作后立即刷新都走这里), 不在函数内部自己拉数据。
+function renderLogPanel() {
+	var meta = E('div', {
+		'style': 'color:#666; font-size:0.9em; margin-bottom:8px;'
+	}, [ _('加载中…') ]);
 
-		// 路由器本地时间 -> 真实时刻 -> 东八区墙钟
-		var utcMs = Date.UTC(+m[6], LOG_MONTHS[m[1]], +m[2],
-			+m[3], +m[4], +m[5]) - offsetMin * 60000;
-		var d = new Date(utcMs + 8 * 3600000);
+	var pre = E('pre', {
+		'style': 'max-height:400px; overflow:auto; padding:10px; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:8px; font-size:0.9em; margin:0;'
+	}, [ _('加载中…') ]);
 
-		return '%d-%02d-%02d %02d:%02d:%02d %s'.format(
-			d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(),
-			d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), m[7]);
-	}).join('\n');
+	var input = E('input', {
+		'type': 'number', 'min': String(LOG_MAX_MIN), 'max': String(LOG_MAX_MAX), 'step': '16',
+		'style': 'width:7em; text-align:right;', 'placeholder': '1024'
+	});
+
+	// 用户正在输入时不要被轮询覆盖掉输入框的值
+	var touched = false;
+
+	input.addEventListener('input', function() { touched = true; });
+
+	var notifyError = function(msg) {
+		ui.addNotification(null, E('p', [ msg ]), 'error');
+	};
+
+	var btnSave = E('button', {
+		'class': 'btn cbi-button cbi-button-apply',
+		'click': function() {
+			var v = String(input.value || '').trim();
+
+			if (!/^\d+$/.test(v) || +v < LOG_MAX_MIN || +v > LOG_MAX_MAX) {
+				notifyError(_('上限必须是 %d–%d 之间的整数 (单位 KB)').format(LOG_MAX_MIN, LOG_MAX_MAX));
+				return Promise.resolve();
+			}
+
+			// 命令行 uci 写入, 不走 uci.apply: 后者会触发服务 reload (stop+start),
+			// 改个日志上限不该把代理重启一次。上限只被 log.sh 与 init 消费。
+			return logExec([ 'setmax', v ]).then(function(res) {
+				if (res.code != 0) {
+					notifyError(_('保存失败: %s').format(String(res.stderr || '').trim() || String(res.code)));
+					return;
+				}
+
+				ui.addNotification(null, E('p', [
+					_('日志上限已设为 %s KB, 立即生效 (不会重启服务)').format(v)
+				]), 'info');
+
+				touched = false;
+				return refresh();
+			});
+		}
+	}, [ _('保存上限') ]);
+
+	var btnClear = E('button', {
+		'class': 'btn cbi-button cbi-button-remove',
+		'click': function() {
+			if (!window.confirm(_('确定清空当前日志? 清空后无法恢复。')))
+				return Promise.resolve();
+
+			return logExec([ 'clear' ]).then(function(res) {
+				if (res.code != 0) {
+					notifyError(_('清空失败: %s').format(String(res.stderr || '').trim() || String(res.code)));
+					return;
+				}
+
+				return refresh();
+			});
+		}
+	}, [ _('清空日志') ]);
+
+	function refresh() {
+		return readLogStatus().then(function(st) {
+			if (!st) {
+				meta.textContent = _('无法读取日志信息 (%s 不可用)').format(LOG_HELPER);
+				pre.textContent = '';
+				return;
+			}
+
+			meta.textContent = _('日志文件: %s  |  当前大小: %s  |  上限: %s KB').format(
+				st.file,
+				st.exists ? formatSize(st.size) : _('文件不存在'),
+				String(st.max_kb));
+
+			if (!touched)
+				input.value = String(st.max_kb);
+
+			return readLogTail().then(function(txt) {
+				pre.textContent = txt || _('日志为空。mihomo 运行后写入的内容会出现在这里, 刚启动时可稍等几秒。');
+			});
+		});
+	}
+
+	var node = E('div', {}, [
+		E('h3', [ _('Mihomo 运行日志') ]),
+		E('div', {
+			'style': 'color:#666; font-size:0.9em; margin:-6px 0 10px 0;'
+		}, [
+			_('进程输出追加写入日志文件, 新登录也能回查以前的内容; 超过上限时只保留最新部分。')
+		]),
+		meta,
+		E('div', {
+			'style': 'display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px;'
+		}, [
+			E('span', {}, [ _('日志上限') ]),
+			input,
+			E('span', [ 'KB' ]),
+			btnSave,
+			btnClear
+		]),
+		pre
+	]);
+
+	return { node: node, refresh: refresh };
 }
 
 return view.extend({
@@ -279,9 +399,7 @@ return view.extend({
 		]);
 
 		/* -- 日志 -- */
-		var logPre = E('pre', {
-			'style': 'max-height:400px; overflow:auto; padding:10px; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:8px; font-size:0.9em;'
-		}, [ _('加载中…') ]);
+		var logPanel = renderLogPanel();
 
 		// 状态刷新的唯一入口: 横幅 / 启停按钮 / 开机自启磁贴 / 日志全部在这里
 		// 更新。轮询周期性调用, 操作完成后也会立即调用 (见 handleServiceAction /
@@ -299,9 +417,7 @@ return view.extend({
 				return isEnabled().then(function(en) {
 					updateEnabled(en);
 
-					return getLog().then(function(log) {
-						logPre.textContent = log || _('暂无日志 (需在运行参数中开启日志输出)');
-					});
+					return logPanel.refresh();
 				});
 			});
 		};
@@ -313,8 +429,7 @@ return view.extend({
 			banner,
 			tiles,
 			buttons,
-			E('h3', [ _('系统日志 (最近 50 行, 时间为东八区 UTC+8)') ]),
-			logPre
+			logPanel.node
 		]);
 	},
 

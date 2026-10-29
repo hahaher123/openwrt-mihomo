@@ -36,10 +36,17 @@ return view.extend({
 		o.placeholder = 'wan';
 
 		o = s.option(form.Flag, 'log_stdout', _('标准输出写入系统日志'));
-		o.default = o.enabled;
+		o.default = o.disabled;
 
 		o = s.option(form.Flag, 'log_stderr', _('错误输出写入系统日志'));
-		o.default = o.enabled;
+		o.default = o.disabled;
+
+		o = s.option(form.Value, 'log_file', _('运行日志文件'),
+			_('mihomo 的进程输出追加写入该文件, 「运行状态」页的日志面板读的就是它 (新登录也能回查)。' +
+			  '需为绝对路径; 改这里需要重启服务才生效, 文件大小上限请在日志面板里调整。' +
+			  '填 /dev/null 表示不落盘。'));
+		o.placeholder = '/var/log/mihomo.log';
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'dashboard', _('后台管理地址'),
 			_('mihomo 外部控制器 Web 界面地址 (metacubexd / yacd 等), 留空则默认 http://<路由器地址>:9090/ui。需在 mihomo 配置文件中启用 external-controller 与 external-ui。'));

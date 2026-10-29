@@ -42,7 +42,7 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 
 | 页面 | 功能 |
 | --- | --- |
-| 运行状态 | 服务状态 / PID / 开机自启 / 程序版本（5 秒刷新）；一键启停；最近 50 行日志（时间统一按东八区显示） |
+| 运行状态 | 服务状态 / PID / 开机自启 / 程序版本（5 秒刷新）；一键启停；运行日志面板（末尾 200 行、日志存放位置与文件大小、可清空、可改上限） |
 | 运行参数 | 编辑 `/etc/config/mihomo`：enabled、conffile、workdir、user、ifaces、日志开关、dashboard；保存并应用即重启生效 |
 | 透明代理 | 开关透明代理（启动前加载策略路由与 nft 规则，停止时移除）；在线编辑 `tproxy.sh` / `clash.nft`；一键检查规则状态 |
 | 配置文件 | 列出 / 编辑 / 校验 / 切换 workdir 下的配置文件；远程导入订阅；仅更新与定时更新服务器和代理组 |
@@ -52,7 +52,10 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 
 - 进度走 stdout、错误走 stderr，手工执行直接可见；被脚本 / cron 调用时可自行 `2>&1 | logger -t xxx`
 - 错误同时写 syslog（标签 `mihomo`），开机阶段 stdout 无去处时也能在 `logread` 里查到
-- **mihomo 进程自身的 stdout/stderr 默认不写入系统日志**（`log_stdout`/`log_stderr` 默认 0）：mihomo 每个连接都打一行 info 日志，转发会刷满 `logread`。排障时临时打开：`uci set mihomo.main.log_stdout=1; uci commit mihomo; /etc/init.d/mihomo restart`；运行中日志也可用仪表盘的 Logs 页实时查看
+- **mihomo 进程输出默认写入日志文件**（`log_file`，默认 `/var/log/mihomo.log`），不写系统日志（`log_stdout`/`log_stderr` 默认 0）：mihomo 每个连接都打一行 info 日志，转发会刷满 `logread`。写文件还能保留历史，重启 LuCI 或换浏览器登录后仍可回查
+- 默认路径 `/var/log/mihomo.log` 在 `/tmp`（内存盘）上：重启后清空、不磨损 flash；要跨重启保留可改到 `/etc/mihomo/` 下的路径（会写 flash，慎用）
+- 日志文件超过 `log_max_kb`（默认 1024 KB）时只保留最新部分：服务启动时裁剪一次，日志面板每次刷新也会检查一次。清空与改上限都在「运行状态」页的日志面板里操作，改上限不重启服务
+- 想彻底不落盘：把 `log_file` 设为 `/dev/null`（启动命令会退回直连启动，不再经过 `sh -c` 重定向）
 - **启动失败返回非 0**（经 `service_started` 钩子带出，rc.common 不会再把它吃成 0），因此 `restart && 后续动作` 与 cron 判断都可信
 - 启动前用 `mihomo -t` 校验配置：失败只打印 mihomo 的错误行并放弃启动，避免 procd 反复 respawn 刷屏；临时跳过校验 `uci set mihomo.main.config_test=0`（或环境变量 `MIHOMO_SKIP_CONFIG_TEST=1`）
 - `/etc/init.d/mihomo diag`：一次打印二进制版本、uci 全部取值、关键文件（含缺失项）、procd 状态与最近日志

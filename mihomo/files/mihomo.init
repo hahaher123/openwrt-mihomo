@@ -49,11 +49,13 @@ start_service() {
 	fi
 
 	local user conffile workdir ifaces transparent config_test
-	local log_stdout log_stderr
+	local log_file log_max_kb log_stdout log_stderr
 	config_get user "main" "user" "root"
 	config_get conffile "main" "conffile" "/etc/mihomo/config.yaml"
 	config_get ifaces "main" "ifaces"
 	config_get workdir "main" "workdir" "/etc/mihomo"
+	config_get log_file "main" "log_file" "/var/log/mihomo.log"
+	config_get log_max_kb "main" "log_max_kb" "1024"
 	# 默认不把 mihomo 的 stdout/stderr 转发进系统日志: mihomo 每个连接都打一行
 	# info 日志, 转发会把 logread 刷满、还加速 logd 轮转。排障时临时打开:
 	#   uci set mihomo.main.log_stdout=1; uci commit mihomo; /etc/init.d/mihomo restart
@@ -100,7 +102,57 @@ start_service() {
 	chown "$user:$group" "$workdir" 2>/dev/null ||
 		warn "无法把 $workdir 的属主改为 $user:$group (继续启动, 可能出现写缓存失败)"
 
-	# 4) 启动前配置校验 ----------------------------------------------------
+	# 4) 运行日志落盘 ------------------------------------------------------
+	# mihomo 只往 stdout 打日志, 配置里没有"写文件"的选项。要能"新登录也看得到
+	# 以前的日志", 只能把进程输出重定向到文件。procd 不支持直接重定向, 所以启动
+	# 命令走 `sh -c 'exec …'` —— exec 之后 pid 仍是 mihomo 本身, 停止与 respawn
+	# 的语义不变。
+	# 空值按默认路径处理 (与 luci-app-mihomo 的 log.sh 一致); 想彻底不落盘就把
+	# log_file 指向 /dev/null。
+	[ -n "$log_file" ] || log_file="/var/log/mihomo.log"
+	case "$log_max_kb" in
+		''|*[!0-9]*) log_max_kb=1024 ;;
+	esac
+
+	case "$log_file" in
+	/*) ;;
+	*) err "日志路径必须是绝对路径 (uci $NAME.main.log_file='$log_file')"; return 1 ;;
+	esac
+	case "$log_file" in
+	*[[:space:]]*) err "日志路径不能含空格或制表符: '$log_file'"; return 1 ;;
+	esac
+
+	local log_dir="" lsize=0 lmax=0
+	log_dir="$(dirname "$log_file")"
+	if [ "$log_file" != "/dev/null" ] && ! mkdir -p "$log_dir"; then
+		warn "无法创建日志目录 $log_dir, 本次不落盘 (日志只在进程内)"
+		log_file=""
+	fi
+
+	if [ -n "$log_file" ] && [ "$log_file" != "/dev/null" ]; then
+		# 上一轮可能已经超过上限: 此刻写者还没起来, 裁剪没有并发写风险
+		# (页面刷新时的裁剪走 luci-app-mihomo 的 log.sh, 那里容忍并发窗口)。
+		if [ -f "$log_file" ] && [ "$log_max_kb" -gt 0 ]; then
+			lsize="$(wc -c < "$log_file" 2>/dev/null || echo 0)"
+			lmax=$((log_max_kb * 1024))
+			if [ "$lsize" -gt "$lmax" ]; then
+				tail -c "$lmax" "$log_file" > "$log_file.trim" &&
+					cat "$log_file.trim" > "$log_file"
+				rm -f "$log_file.trim"
+				say "  运行日志: 原有 $lsize 字节超过 ${log_max_kb} KB, 已裁剪为最新内容"
+			fi
+		fi
+		: >> "$log_file" || warn "无法写入日志文件 $log_file (检查目录权限)"
+		chown "$user:$group" "$log_file" 2>/dev/null
+		say "  运行日志: $log_file (上限 ${log_max_kb} KB, 超出时保留最新部分)"
+	elif [ "$log_file" = "/dev/null" ]; then
+		say "  运行日志: 已关闭 (log_file=/dev/null)"
+		# 置空让下面的 procd 段走"不重定向"的直启分支: 重定向到 /dev/null 虽然
+		# 结果等价, 但多一层 sh -c 没有任何意义。
+		log_file=""
+	fi
+
+	# 5) 启动前配置校验 ----------------------------------------------------
 	# mihomo -t 只解析配置、不监听端口, 失败时给出行号级的错误。
 	# 不校验的话坏配置会让 procd 反复 respawn, 日志里只剩难以定位的崩溃。
 	if [ "$config_test" -eq "1" ] && [ "${MIHOMO_SKIP_CONFIG_TEST:-0}" != "1" ]; then
@@ -121,7 +173,7 @@ start_service() {
 		warn "已跳过配置校验 (config_test=0 或 MIHOMO_SKIP_CONFIG_TEST=1)"
 	fi
 
-	# 5) 透明代理 ----------------------------------------------------------
+	# 6) 透明代理 ----------------------------------------------------------
 	# 策略路由与 nft 规则必须在 mihomo 启动前就位, 否则首包会被漏掉。
 	if [ "$transparent" -eq "1" ]; then
 		local nft_bin
@@ -162,9 +214,20 @@ start_service() {
 		say "  透明代理: 未启用 (uci $NAME.main.transparent=0)"
 	fi
 
-	# 6) 交给 procd --------------------------------------------------------
+	# 7) 交给 procd --------------------------------------------------------
 	procd_open_instance "$NAME.main"
-	procd_set_param command "$PROG" -f "$conffile" -d "$workdir"
+	if [ -n "$log_file" ]; then
+		# 路径通过环境变量传, 不拼进 sh -c 的脚本体 (免得路径里的引号/空格破坏语法)。
+		# "$0" = PROG, "$@" = -f … -d …, 所以 exec 出来的就是 mihomo 本身。
+		procd_set_param env MIHOMO_LOG_FILE="$log_file"
+		procd_set_param command /bin/sh -c 'exec "$0" "$@" >>"$MIHOMO_LOG_FILE" 2>&1' \
+			"$PROG" -f "$conffile" -d "$workdir"
+	else
+		procd_set_param command "$PROG" -f "$conffile" -d "$workdir"
+	fi
+	if [ -n "$log_file" ] && { [ "$log_stdout" = "1" ] || [ "$log_stderr" = "1" ]; }; then
+		warn "已启用日志文件: uci $NAME.main.log_stdout/log_stderr 不再生效 (输出已被重定向)"
+	fi
 
 	# Use root user if you want to use transparent proxy (REDIRECT/TPROXY).
 	procd_set_param user "$user"
