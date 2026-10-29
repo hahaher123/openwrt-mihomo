@@ -66,7 +66,7 @@ function readLogStatus() {
 		if (res.code != 0)
 			return null;
 
-		var st = { file: '', exists: false, size: 0, max_kb: 0 };
+		var st = { file: '', exists: false, size: 0, max_kb: 0, lines: 0 };
 
 		String(res.stdout || '').split('\n').forEach(function(line) {
 			var i = line.indexOf('=');
@@ -83,6 +83,8 @@ function readLogStatus() {
 				st.size = parseInt(v, 10) || 0;
 			else if (k == 'max_kb')
 				st.max_kb = parseInt(v, 10) || 0;
+			else if (k == 'lines')
+				st.lines = parseInt(v, 10) || 0;
 		});
 
 		return st.file ? st : null;
@@ -91,6 +93,15 @@ function readLogStatus() {
 
 function readLogTail() {
 	return logExec([ 'tail', String(LOG_TAIL_LINES) ]).then(function(res) {
+		return (res.code == 0) ? String(res.stdout || '').replace(/\s+$/, '') : '';
+	});
+}
+
+// 按绝对行号取一段日志, 用于向上翻历史。用绝对行号而不是"跳过末尾 N 行":
+// 翻历史的过程中日志仍在增长, 末尾偏移会整体前移, 上翻取到的会是新写入的
+// 尾部(插到顶部就把时间顺序打乱了); 绝对行号只随头部裁剪失效。
+function readLogPage(start, lim) {
+	return logExec([ 'page', String(start), String(lim) ]).then(function(res) {
 		return (res.code == 0) ? String(res.stdout || '').replace(/\s+$/, '') : '';
 	});
 }
@@ -109,9 +120,14 @@ function renderLogPanel() {
 		'style': 'color:#666; font-size:0.9em; margin-bottom:8px;'
 	}, [ _('加载中…') ]);
 
+	// 日志区。高度给足, 一次能看到的行多些; 更早的内容用下方「加载更早」翻。
 	var pre = E('pre', {
-		'style': 'max-height:400px; overflow:auto; padding:10px; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:8px; font-size:0.9em; margin:0;'
+		'style': 'max-height:480px; overflow:auto; padding:10px; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:8px; font-size:0.9em; margin:0;'
 	}, [ _('加载中…') ]);
+
+	var hint = E('div', {
+		'style': 'color:#666; font-size:0.85em; margin-top:6px;'
+	}, [ '' ]);
 
 	var input = E('input', {
 		'type': 'number', 'min': String(LOG_MAX_MIN), 'max': String(LOG_MAX_MAX), 'step': '16',
@@ -123,9 +139,32 @@ function renderLogPanel() {
 
 	input.addEventListener('input', function() { touched = true; });
 
+	// -- 分页状态 ------------------------------------------------------
+	// loadedTop : 已经加载出来的最顶行号(1 起); 上翻就是把它往前推。
+	// loadedCnt : 已加载的行数, 只用于给用户看进度。
+	// historyMode: 用户是否已上翻离开最新页。为真时暂停自动刷新, 否则新增的
+	//              日志会把用户正在看的历史顶走。
+	var loadedTop = 0, loadedCnt = 0, totalRows = 0, busy = false, lastTotal = 0;
+	var historyMode = false;
+
 	var notifyError = function(msg) {
 		ui.addNotification(null, E('p', [ msg ]), 'error');
 	};
+
+	var btnOlder = E('button', {
+		'class': 'btn cbi-button',
+		'click': function() { return loadOlder(); }
+	}, [ _('加载更早的日志') ]);
+
+	var btnLatest = E('button', {
+		'class': 'btn cbi-button',
+		'click': function() {
+			historyMode = false;
+			loadedTop = 0;
+			loadedCnt = 0;
+			return refresh();
+		}
+	}, [ _('回到最新') ]);
 
 	var btnSave = E('button', {
 		'class': 'btn cbi-button cbi-button-apply',
@@ -167,16 +206,86 @@ function renderLogPanel() {
 					return;
 				}
 
+				// 清空后重新从"实时模式"开始, 否则会停在历史模式里显示空内容
+				historyMode = false;
+				loadedTop = 0;
+				loadedCnt = 0;
+				lastTotal = 0;
 				return refresh();
 			});
 		}
 	}, [ _('清空日志') ]);
+
+	function syncControls() {
+		var hasOlder = loadedTop > 1;
+
+		btnOlder.disabled = !hasOlder;
+		btnLatest.disabled = !historyMode;
+
+		if (historyMode)
+			hint.textContent = _('正在查看历史: 已加载 %s 行 / 共 %s 行, 自动刷新已暂停 (点「回到最新」恢复)')
+				.format(String(loadedCnt), String(totalRows));
+		else if (hasOlder)
+			hint.textContent = _('已显示最新 %s 行 / 共 %s 行, 可继续上翻')
+				.format(String(loadedCnt), String(totalRows));
+		else
+			hint.textContent = _('已显示全部 %s 行').format(String(loadedCnt));
+	}
+
+	// 向上取一页并前插。滚动位置要补偿: 否则新插入的内容会把用户正在看的
+	// 那几行顶走, 上翻体验等于"跳回顶部再看一遍"。
+	function loadOlder() {
+		if (busy)
+			return Promise.resolve();
+
+		if (loadedTop <= 1) {
+			hint.textContent = _('没有更早的日志了');
+			btnOlder.disabled = true;
+			return Promise.resolve();
+		}
+
+		var start = loadedTop - LOG_TAIL_LINES;
+		if (start < 1)
+			start = 1;
+
+		busy = true;
+		btnOlder.disabled = true;
+
+		var prevH = pre.scrollHeight, prevTop = pre.scrollTop;
+
+		return readLogPage(start, loadedTop - start).then(function(txt) {
+			busy = false;
+
+			if (!txt) {
+				hint.textContent = _('没有更早的日志了');
+				btnOlder.disabled = true;
+				return;
+			}
+
+			var added = txt.split('\n').length;
+
+			// 前插并补偿滚动位置: 否则新内容会把用户正在看的那几行顶走,
+			// 上翻体验等于"跳回顶部再看一遍"。
+			pre.textContent = txt + '\n' + pre.textContent;
+			pre.scrollTop = prevTop + (pre.scrollHeight - prevH);
+
+			loadedTop = start;
+			loadedCnt += added;
+			historyMode = true;
+			syncControls();
+		}).catch(function(e) {
+			busy = false;
+			notifyError(_('加载失败: %s').format(String(e && e.message ? e.message : e)));
+			syncControls();
+		});
+	}
 
 	function refresh() {
 		return readLogStatus().then(function(st) {
 			if (!st) {
 				meta.textContent = _('无法读取日志信息 (%s 不可用)').format(LOG_HELPER);
 				pre.textContent = '';
+				hint.textContent = '';
 				return;
 			}
 
@@ -188,8 +297,33 @@ function renderLogPanel() {
 			if (!touched)
 				input.value = String(st.max_kb);
 
-			return readLogTail().then(function(txt) {
+			totalRows = st.lines;
+
+			// 日志被清空或被裁剪过头(trim 只保留尾部): 行号锚点失效,
+			// 退回实时模式重新取, 否则会继续拿旧行号去取已经不存在的位置。
+			if (historyMode && st.lines < lastTotal) {
+				historyMode = false;
+				loadedTop = 0;
+				loadedCnt = 0;
+			}
+
+			lastTotal = st.lines;
+
+			// 历史模式: 不覆盖正文, 只更新页脚(总行数可能变了)
+			if (historyMode) {
+				syncControls();
+				return;
+			}
+
+			var start = st.lines - LOG_TAIL_LINES + 1;
+			if (start < 1)
+				start = 1;
+
+			return readLogPage(start, LOG_TAIL_LINES).then(function(txt) {
 				pre.textContent = txt || _('日志为空。mihomo 运行后写入的内容会出现在这里, 刚启动时可稍等几秒。');
+				loadedTop = txt ? start : 0;
+				loadedCnt = txt ? txt.split('\n').length : 0;
+				syncControls();
 			});
 		});
 	}
@@ -199,7 +333,7 @@ function renderLogPanel() {
 		E('div', {
 			'style': 'color:#666; font-size:0.9em; margin:-6px 0 10px 0;'
 		}, [
-			_('进程输出追加写入日志文件, 新登录也能回查以前的内容; 超过上限时只保留最新部分。')
+			_('进程输出追加写入日志文件, 新登录也能回查; 「加载更早的日志」可一直往前翻到日志开头, 超过上限时只保留最新部分。')
 		]),
 		meta,
 		E('div', {
@@ -211,7 +345,11 @@ function renderLogPanel() {
 			btnSave,
 			btnClear
 		]),
-		pre
+		pre,
+		E('div', {
+			'style': 'display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0 0 0;'
+		}, [ btnOlder, btnLatest ]),
+		hint
 	]);
 
 	return { node: node, refresh: refresh };

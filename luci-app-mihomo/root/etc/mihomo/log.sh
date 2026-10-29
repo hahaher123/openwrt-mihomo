@@ -1,8 +1,9 @@
 #!/bin/sh
 # mihomo 运行日志的查看与维护（LuCI「运行状态」页的日志面板调用本脚本）。
 #
-#   log.sh status            打印 file / exists / size / max_kb, 供页面显示
+#   log.sh status            打印 file / exists / size / max_kb / lines, 供页面显示
 #   log.sh tail [N]          打印最后 N 行 (默认 200, 上限 2000); 超上限时先裁剪
+#   log.sh page <start> <lim>  从第 start 行开始取 lim 行, 供页面「加载更早」分页回查
 #   log.sh clear             清空当前日志
 #   log.sh trim              超过上限时只保留最新的 max_kb KB
 #   log.sh setmax <KB>       把上限写入 uci mihomo.main.log_max_kb
@@ -41,6 +42,16 @@ log_size() {
 	fi
 }
 
+# 行数。用 awk 而不是 wc -l: 末尾没有换行时 wc -l 会少算一行,
+# 而 tail -c 裁剪正好可能把最后一行留在没有换行的状态。
+log_lines() {
+	if [ -f "$LOG_FILE" ]; then
+		awk 'END { print NR + 0 }' "$LOG_FILE" 2>/dev/null || echo 0
+	else
+		echo 0
+	fi
+}
+
 # 裁剪到最新的 max_kb KB。调用方负责保证"写者不在写"(init 启动前) 或接受
 # 极短窗口内可能丢一两行(页面刷新时) —— 见文件头的说明。
 do_trim() {
@@ -69,6 +80,31 @@ cmd_status() {
 	printf 'exists=%s\n' "$exists"
 	printf 'size=%s\n' "$size"
 	printf 'max_kb=%s\n' "$MAX_KB"
+	printf 'lines=%s\n' "$(log_lines)"
+	return 0
+}
+
+# 按绝对行号取一段, 供页面「加载更早」分页回查。
+#   page <start> <lim>: 从第 start 行(1 起)开始取 lim 行, 按时间正序打印。
+#
+# 为什么用绝对行号而不是"跳过末尾 N 行": 日志在用户翻历史时仍在追加。
+# 「跳过末尾 N 行」会随文件增长整体前移 —— 上翻时取到的其实是新写入的尾部,
+# 插到顶部就把时间顺序打乱了。绝对行号只随头部裁剪(trim)失效, 而 trim 必然
+# 伴随总行数下降, 页面据此重置即可。
+cmd_page() {
+	local start="$1" lim="$2" total
+	case "$start" in ''|*[!0-9]*) start=1 ;; esac
+	case "$lim" in ''|*[!0-9]*) lim=200 ;; esac
+	[ "$start" -ge 1 ] || start=1
+	[ "$lim" -ge 1 ] || lim=200
+	[ "$lim" -le 2000 ] || lim=2000
+
+	[ -f "$LOG_FILE" ] || return 0
+	do_trim || true
+
+	total=$(log_lines)
+	[ "$total" -ge "$start" ] || return 0
+	tail -n +"$start" "$LOG_FILE" | head -n "$lim"
 	return 0
 }
 
@@ -114,11 +150,12 @@ cmd_setmax() {
 case "$1" in
 	status)  cmd_status ;;
 	tail)    cmd_tail "$2" ;;
+	page)    cmd_page "$2" "$3" ;;
 	clear)   cmd_clear ;;
 	trim)    cmd_trim ;;
 	setmax)  cmd_setmax "$2" ;;
 	*)
-		echo "用法: $0 {status|tail [N]|clear|trim|setmax <KB>}" >&2
+		echo "用法: $0 {status|tail [N]|page <start> <limit>|clear|trim|setmax <KB>}" >&2
 		exit 1
 		;;
 esac

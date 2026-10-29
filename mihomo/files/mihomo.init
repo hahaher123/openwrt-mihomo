@@ -239,12 +239,17 @@ start_service() {
 
 	procd_close_instance
 	say "  已提交 procd 实例 $NAME.main (respawn 已开启)"
-	if [ "$log_stdout" = "1" ] || [ "$log_stderr" = "1" ]; then
-		say "  进程日志: logread -e mihomo    进程状态: /etc/init.d/$NAME status"
+	# 日志去向按实际情况给结论, 不要一律引导去开 syslog:
+	# 已有日志文件时, 排障就该看那个文件, 再开 syslog 只是重复一份。
+	if [ -n "$log_file" ]; then
+		say "  进程日志: 已写入 $log_file (不写系统日志)    进程状态: /etc/init.d/$NAME status"
+	elif [ "$log_stdout" = "1" ] || [ "$log_stderr" = "1" ]; then
+		say "  进程日志: logread -e $LOG_TAG    进程状态: /etc/init.d/$NAME status"
 	else
-		say "  进程日志: 未写入系统日志 (log_stdout/log_stderr=0)    进程状态: /etc/init.d/$NAME status"
-		say "            mihomo 自身日志不再进 logread; 排障需要时打开:"
-		say "            uci set $NAME.main.log_stdout=1; uci commit $NAME; /etc/init.d/$NAME restart"
+		say "  进程日志: 未保留 (log_file 已关闭且 log_stdout/log_stderr=0)"
+		say "            排障时二选一, 改完 commit 并 restart:"
+		say "              落盘:     uci set $NAME.main.log_file=/var/log/$NAME.log"
+		say "              系统日志: uci set $NAME.main.log_stdout=1"
 	fi
 	return 0
 }
