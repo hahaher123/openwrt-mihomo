@@ -12,6 +12,17 @@ name: Build and release Mihomo APK
 # 一次构建 x86_64 / aarch64_generic 两个架构的 APK（含 mihomo 与 luci-app-mihomo
 # 两个包），按两个 Makefile 中的当前版本打 tag 并发布 Release；发布后自动裁剪旧
 # Release，只保留最新 5 个（.ci/prune-releases.sh，git tag 一律保留）。
+#
+# 三个 job 的分工：
+#   prepare —— 解析版本、判断是否需要构建、跑包内脚本 exec-bits 闸门（一次性，
+#              不必在两个架构的 job 里重复跑）。
+#   build   —— matrix 按架构并行编译（此前两个架构串行跑在同一 job 里，墙钟
+#              44 分钟；并行后墙钟 = 最慢的一个架构）。每个 job 自带 Go 编译
+#              缓存（GOCACHE + GOMODCACHE，见 .ci/build-in-sdk.sh 的 GO_CACHE_DIR）。
+#   publish —— 汇总两个架构的产物，打 tag、发 Release、裁剪旧 Release。
+#              签名密钥为各 build job 现场生成的临时 signify 密钥（与旧单 job
+#              行为一致：密钥不离开 job，无人持有，安装走 --allow-untrusted /
+#              ImageBuilder 重索引，因此两架构密钥不同没有影响）。
 on:
   push:
     branches:
@@ -98,31 +109,6 @@ jobs:
           echo "tag=${TAG}"     >> "$GITHUB_OUTPUT"
           echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Build APK and publish release
-    needs: prepare
-    # tag 已存在且非 force 时整轮跳过：不编译、不打 tag、不动 Release。
-    if: needs.prepare.outputs.build == 'true'
-    runs-on: ubuntu-latest
-
-    env:
-      # 构建用的 OpenWrt 发行版：决定 gh-action-sdk 拉哪个 SDK 镜像
-      # （x86_64-<ver> / aarch64_generic-<ver>）。跟随主线版本，别钉死在旧版。
-      OPENWRT_VERSION: '25.12.6'
-      # 本仓库被挂载为 SDK 的一个 feed，此名即 /feed 的挂载源名
-      SDK_FEEDNAME: mihomo
-      # 一次编这两个包；luci-app-mihomo 硬依赖 +mihomo，会连带先编 mihomo
-      SDK_PACKAGES: mihomo luci-app-mihomo
-
-    steps:
-      - name: Checkout source tree
-        uses: actions/checkout@v6
-        with:
-          # 发布描述要写「相对上一次发布的改动」，需要完整提交历史与 tag；
-          # 默认的浅克隆（depth=1）会让 `git log <prev-tag>..HEAD` 直接失败。
-          fetch-depth: 0
-          fetch-tags: true
-
       - name: Check exec bits of luci package scripts
         run: |
           # luci.mk 用 `cp -pR` 把 luci-app-mihomo/root/ 原样搬进包，不走
@@ -149,6 +135,180 @@ jobs:
           fi
           echo "OK: luci-app-mihomo/root/ 下的脚本索引模式均为 100755"
 
+  build:
+    name: Build APK (${{ matrix.arch }})
+    needs: prepare
+    # tag 已存在且非 force 时整轮跳过：不编译、不打 tag、不动 Release。
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64_generic]
+
+    env:
+      # 构建用的 OpenWrt 发行版：决定 gh-action-sdk 拉哪个 SDK 镜像
+      # （x86_64-<ver> / aarch64_generic-<ver>）。跟随主线版本，别钉死在旧版。
+      OPENWRT_VERSION: '25.12.6'
+      # 本仓库被挂载为 SDK 的一个 feed，此名即 /feed 的挂载源名
+      SDK_FEEDNAME: mihomo
+      # 一次编这两个包；luci-app-mihomo 硬依赖 +mihomo，会连带先编 mihomo
+      SDK_PACKAGES: mihomo luci-app-mihomo
+
+    steps:
+      - name: Checkout source tree
+        uses: actions/checkout@v6
+        with:
+          # 编译只需要工作区内容，浅克隆即可（发布描述的历史遍历在 publish job）。
+          fetch-depth: 1
+
+      - name: Read package versions
+        env:
+          EXPECTED_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          MIHOMO_VER=$(grep -m1 '^PKG_VERSION:=' mihomo/Makefile | cut -d= -f2 | tr -d ' ')
+          MIHOMO_REL=$(grep -m1 '^PKG_RELEASE:=' mihomo/Makefile | cut -d= -f2 | tr -d ' ')
+          LUCI_VER=$(grep -m1 '^PKG_VERSION:=' luci-app-mihomo/Makefile | cut -d= -f2 | tr -d ' ')
+          LUCI_REL=$(grep -m1 '^PKG_RELEASE:=' luci-app-mihomo/Makefile | cut -d= -f2 | tr -d ' ')
+
+          TAG="v${MIHOMO_VER}-r${MIHOMO_REL}-luci${LUCI_VER}-r${LUCI_REL}"
+
+          # 与 prepare 阶段独立算出的 tag 对一遍。两处都从 Makefile 读，理论上必然
+          # 相同；一旦不同说明有一处逻辑漂移了，宁可在这里失败，也别发错版本。
+          if [ "${TAG}" != "${EXPECTED_TAG}" ]; then
+            echo "::error::tag 与 prepare 阶段不一致（本步 ${TAG} / prepare ${EXPECTED_TAG}）"
+            exit 1
+          fi
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Generate build keys
+        run: |
+          # 包签名：私钥写进 KEY_BUILD（$GITHUB_ENV），SDK 动作会把它带进容器，
+          # 于是 entrypoint 里 CONFIG_SIGNED_PACKAGES=y，产出的 apk 带签名。
+          # 密钥为本 job 现场生成的临时密钥，不离开 job（不能走 artifact 传递 ——
+          # 公开仓库的 artifact 任何人可下载，等于泄露私钥）。
+          sudo apt-get update
+          sudo apt-get install -y signify-openbsd
+          signify-openbsd -G -n -c 'DO NOT USE - OpenWrt packages feed CI' -p packages_ci.pub -s packages_ci.sec
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "KEY_BUILD<<$EOF" >> "$GITHUB_ENV"
+          cat packages_ci.sec >> "$GITHUB_ENV"
+          echo "$EOF" >> "$GITHUB_ENV"
+
+      - name: Fetch SDK entrypoint
+        env:
+          SDK_ACTION_SHA: '7fc2640243284ecc44f4a9c3f749a61746ee02cb'
+        run: |
+          set -eu
+          curl -fsSL --retry 3 \
+            "https://raw.githubusercontent.com/openwrt/gh-action-sdk/${SDK_ACTION_SHA}/entrypoint.sh" \
+            -o "${RUNNER_TEMP}/sdk-entrypoint.sh"
+          chmod +x "${RUNNER_TEMP}/sdk-entrypoint.sh"
+
+      # Go 编译缓存：GOCACHE（/builder/tmp/go-build）+ GOMODCACHE
+      # （/builder/dl/go-mod-cache）由 build-in-sdk.sh 挂进容器。键按架构 + SDK
+      # 版本隔离；缓存内容与包版本无关（Go 自己按输入哈希失效条目），版本升级时
+      # 旧条目留作暖机、新条目自动生成。
+      - name: Cache Go build cache (GOCACHE)
+        uses: actions/cache@v4
+        with:
+          path: go-cache/build
+          key: gocache-${{ matrix.arch }}-${{ env.OPENWRT_VERSION }}-v1
+          restore-keys: gocache-${{ matrix.arch }}-${{ env.OPENWRT_VERSION }}-
+
+      - name: Cache Go module cache (GOMODCACHE)
+        uses: actions/cache@v4
+        with:
+          path: go-cache/mod
+          key: gomod-${{ matrix.arch }}-${{ env.OPENWRT_VERSION }}-v1
+          restore-keys: gomod-${{ matrix.arch }}-${{ env.OPENWRT_VERSION }}-
+
+      # 用官方 SDK 镜像编译：SDK 由镜像自带（按 ARCH 选 tag），宿主机不再下载
+      # SDK、也不需要 build-essential / pyelftools 那一套。
+      #
+      # 为什么不用 openwrt/gh-action-sdk 这个 composite action：
+      #   它在 `docker run` 里对 --env 做了白名单（build / feedname / packages /
+      #   v / index / key_build ...），**FIXUP 不在名单里**，而 entrypoint 会跑
+      #   `make package/<pkg>/check`，然后用 grep 直接匹配日志里的
+      #   "HASH uses deprecated hash," 并 exit 1。本包有意用 `HASH:=skip`
+      #   （geo 数据与上游 tag tarball 都不该钉死校验和），在 SDK 25.12 上必然
+      #   命中这条 —— 传不进 FIXUP 就只能把 checksum 写死再周期性失效。
+      #   所以这里直接 docker run 官方镜像 + 官方 entrypoint，自己控制 --env，
+      #   带上 FIXUP=1 让 fixup-makefile.pl 在容器内把 hash 就地补全（只改
+      #   /feed 里的工作区副本，不会提交）。
+      #
+      # entrypoint 在 PACKAGES 非空时会先跑 `make package/<pkg>/download` 再
+      # `check` 再 `compile` —— mihomo 用 Download/ 宏拿的 Country.mmdb /
+      # geoip.dat / geosite.dat 正好被这一步拉齐，不需要在 workflow 里另写。
+      #
+      # INDEX: '1' 让容器里用 apk mkndx + adbdump 现建一次索引，等于用设备/
+      # ImageBuilder 的同一套 apk-tools 校验产物能不能被索引，拦在发布之前。
+      - name: Prepare artifact dirs
+        run: mkdir -p "$GITHUB_WORKSPACE/artifacts/${{ matrix.arch }}" "$GITHUB_WORKSPACE/go-cache/build" "$GITHUB_WORKSPACE/go-cache/mod"
+
+      - name: Build APKs
+        env:
+          ARCH: ${{ matrix.arch }}-${{ env.OPENWRT_VERSION }}
+          FEEDNAME: ${{ env.SDK_FEEDNAME }}
+          PACKAGES: ${{ env.SDK_PACKAGES }}
+          FEED_DIR: ${{ github.workspace }}
+          ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/${{ matrix.arch }}
+          GO_CACHE_DIR: ${{ github.workspace }}/go-cache
+          V: s
+          INDEX: '1'
+        run: bash .ci/build-in-sdk.sh
+
+      - name: Collect APKs
+        run: |
+          set -e
+          mkdir -p dist
+
+          d="artifacts/${{ matrix.arch }}/bin/packages"
+          if [ ! -d "$d" ]; then
+            echo "::error::没有产物目录 $d（构建可能失败）"
+            exit 1
+          fi
+
+          find "$d" \( -name 'mihomo*.apk' -o -name 'luci-app-mihomo*.apk' \) -print | while read -r f; do
+            base=$(basename "$f" .apk)
+            case "$base" in
+              # luci-app-mihomo is arch-independent ("noarch") but is emitted
+              # into the target arch dir, so keep a single unsuffixed copy;
+              # mihomo itself is arch-specific and needs the suffix.
+              luci-app-mihomo*) dst="dist/${base}.apk" ;;
+              *)                dst="dist/${base}_${{ matrix.arch }}.apk" ;;
+            esac
+            cp -f "$f" "$dst"
+            echo "collected: $dst"
+          done
+
+          echo "--- release assets ---"
+          ls -l dist/
+          [ -n "$(ls -A dist 2>/dev/null)" ] || { echo "::error::no APK was produced"; exit 1; }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mihomo-apk-${{ matrix.arch }}
+          path: dist/*.apk
+
+  publish:
+    name: Publish release
+    needs: [prepare, build]
+    # needs.build 对 matrix 的成功判定是「所有 matrix job 都成功」，天然串起两架构。
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source tree
+        uses: actions/checkout@v6
+        with:
+          # 发布描述要写「相对上一次发布的改动」，需要完整提交历史与 tag；
+          # 默认的浅克隆（depth=1）会让 `git log <prev-tag>..HEAD` 直接失败。
+          fetch-depth: 0
+          fetch-tags: true
+
       - name: Read package versions
         env:
           EXPECTED_TAG: ${{ needs.prepare.outputs.tag }}
@@ -162,19 +322,13 @@ jobs:
           LUCI_FULL="${LUCI_VER}-r${LUCI_REL}"
           TAG="v${MIHOMO_FULL}-luci${LUCI_FULL}"
 
-          # 与 prepare 阶段独立算出的 tag 对一遍。两处都从 Makefile 读，理论上必然
-          # 相同；一旦不同说明有一处逻辑漂移了，宁可在这里失败，也别发错版本。
           if [ "${TAG}" != "${EXPECTED_TAG}" ]; then
             echo "::error::tag 与 prepare 阶段不一致（本步 ${TAG} / prepare ${EXPECTED_TAG}）"
             exit 1
           fi
 
           {
-            echo "MIHOMO_VER=${MIHOMO_VER}"
-            echo "MIHOMO_REL=${MIHOMO_REL}"
             echo "MIHOMO_FULL=${MIHOMO_FULL}"
-            echo "LUCI_VER=${LUCI_VER}"
-            echo "LUCI_REL=${LUCI_REL}"
             echo "LUCI_FULL=${LUCI_FULL}"
             echo "TAG=${TAG}"
             echo "TITLE=mihomo ${MIHOMO_FULL} + luci-app-mihomo ${LUCI_FULL}"
@@ -191,115 +345,22 @@ jobs:
             echo "tag: ${TAG}"
           } >> $GITHUB_STEP_SUMMARY
 
-      - name: Generate build keys
-        run: |
-          # 包签名：私钥写进 KEY_BUILD（$GITHUB_ENV），SDK 动作会把它带进容器，
-          # 于是 entrypoint 里 CONFIG_SIGNED_PACKAGES=y，产出的 apk 带签名。
-          sudo apt-get update
-          sudo apt-get install -y signify-openbsd
-          signify-openbsd -G -n -c 'DO NOT USE - OpenWrt packages feed CI' -p packages_ci.pub -s packages_ci.sec
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "KEY_BUILD<<$EOF" >> "$GITHUB_ENV"
-          cat packages_ci.sec >> "$GITHUB_ENV"
-          echo "$EOF" >> "$GITHUB_ENV"
+      - name: Download APKs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: mihomo-apk-*
+          merge-multiple: true
 
-      # 用官方 SDK 镜像编译：SDK 由镜像自带（按 ARCH 选 tag），宿主机不再下载
-      # SDK、也不需要 build-essential / pyelftools 那一套。
-      #
-      # 为什么不用 openwrt/gh-action-sdk 这个 composite action：
-      #   它在 `docker run` 里对 --env 做了白名单（build / feedname / packages /
-      #   v / index / key_build ...），**FIXUP 不在名单里**，而 entrypoint 会跑
-      #   `make package/<pkg>/check`，然后用 grep 直接匹配日志里的
-      #   "HASH uses deprecated hash," 并 exit 1。本包有意用 `HASH:=skip`
-      #   （geo 数据与上游 tag tarball 都不该钉死校验和），在 SDK 25.12 上必然
-      #   命中这条 —— 传不进 FIXUP 就只能把 checksum 写死再周期性失效。
-      #   所以这里直接 docker run 官方镜像 + 官方 entrypoint，自己控制 --env，
-      #   带上 FIXUP=1 让 fixup-makefile.pl 在容器内把 hash 就地补全（只改
-      #   /feed 里的工作区副本，不会提交）。
-      #
-      # 一次只能编一个 ARCH，所以两个架构各一个 step；产物按 ARCH 分目录，
-      # 后面 Collect 步骤统一收拢。
-      #
-      # entrypoint 在 PACKAGES 非空时会先跑 `make package/<pkg>/download` 再
-      # `check` 再 `compile` —— mihomo 用 Download/ 宏拿的 Country.mmdb /
-      # geoip.dat / geosite.dat 正好被这一步拉齐，不需要在 workflow 里另写。
-      #
-      # INDEX: '1' 让容器里用 apk mkndx + adbdump 现建一次索引，等于用设备/
-      # ImageBuilder 的同一套 apk-tools 校验产物能不能被索引，拦在发布之前。
-      # 两个架构各用一个独立的 ARTIFACTS_DIR：动作结束时是 `mv bin/ /artifacts/`，
-      # 若两次都指向同一个目录，第二次会变成 bin/bin 嵌套。目录必须先存在。
-      - name: Prepare artifact dirs
-        run: mkdir -p "$GITHUB_WORKSPACE/artifacts/x86_64" "$GITHUB_WORKSPACE/artifacts/aarch64_generic"
-
-      # entrypoint 从 gh-action-sdk 的同一个 commit 取，行为与用 action 时一致；
-      # 钉 SHA 是为了不让上游改动悄悄改变构建语义。
-      - name: Fetch SDK entrypoint
-        env:
-          SDK_ACTION_SHA: '7fc2640243284ecc44f4a9c3f749a61746ee02cb'
+      - name: Check APKs
         run: |
           set -eu
-          curl -fsSL --retry 3 \
-            "https://raw.githubusercontent.com/openwrt/gh-action-sdk/${SDK_ACTION_SHA}/entrypoint.sh" \
-            -o "${RUNNER_TEMP}/sdk-entrypoint.sh"
-          chmod +x "${RUNNER_TEMP}/sdk-entrypoint.sh"
-
-      - name: Build APKs (x86_64)
-        env:
-          ARCH: x86_64-${{ env.OPENWRT_VERSION }}
-          FEEDNAME: ${{ env.SDK_FEEDNAME }}
-          PACKAGES: ${{ env.SDK_PACKAGES }}
-          FEED_DIR: ${{ github.workspace }}
-          ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/x86_64
-          V: s
-          INDEX: '1'
-        run: bash .ci/build-in-sdk.sh
-
-      - name: Build APKs (aarch64_generic)
-        env:
-          ARCH: aarch64_generic-${{ env.OPENWRT_VERSION }}
-          FEEDNAME: ${{ env.SDK_FEEDNAME }}
-          PACKAGES: ${{ env.SDK_PACKAGES }}
-          FEED_DIR: ${{ github.workspace }}
-          ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/aarch64_generic
-          V: s
-          INDEX: '1'
-        run: bash .ci/build-in-sdk.sh
-
-      - name: Collect APKs
-        run: |
-          set -e
-          mkdir -p dist
-
-          for ARCH in x86_64 aarch64_generic; do
-            d="artifacts/${ARCH}/bin/packages"
-            if [ ! -d "$d" ]; then
-              echo "::error::没有产物目录 $d（该架构的构建可能被跳过或失败）"
-              exit 1
-            fi
-
-            find "$d" \( -name 'mihomo*.apk' -o -name 'luci-app-mihomo*.apk' \) -print | while read -r f; do
-              base=$(basename "$f" .apk)
-              case "$base" in
-                # luci-app-mihomo is arch-independent ("noarch") but is emitted
-                # into the target arch dir, so keep a single unsuffixed copy;
-                # mihomo itself is arch-specific and needs the suffix.
-                luci-app-mihomo*) dst="dist/${base}.apk" ;;
-                *)                dst="dist/${base}_${ARCH}.apk" ;;
-              esac
-              cp -f "$f" "$dst"
-              echo "collected: $dst"
-            done
+          find dist -type f -printf '%p  %s bytes\n' | sort
+          # 两个架构的 mihomo + 一份 noarch 的 luci-app-mihomo，缺一不可。
+          for pat in 'mihomo-*_x86_64.apk' 'mihomo-*_aarch64_generic.apk' 'luci-app-mihomo-*.apk'; do
+            count=$(find dist -type f -name "$pat" | wc -l)
+            [ "$count" -ge 1 ] || { echo "::error::缺 $pat"; exit 1; }
           done
-
-          echo "--- release assets ---"
-          ls -l dist/
-          [ -n "$(ls -A dist 2>/dev/null)" ] || { echo "::error::no APK was produced"; exit 1; }
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: mihomo-apk
-          path: dist/*.apk
 
       - name: Publish release
         env:
@@ -401,7 +462,7 @@ jobs:
           echo "release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
       # 发布完自动清理旧 Release：只保留最新 5 个（脚本幂等，数量不超上限时空跑）。
-      # 在 build 里做而不是单独一个 workflow，是为了「发完顺手清」——不依赖任何
+      # 在 publish 里做而不是单独一个 workflow，是为了「发完顺手清」——不依赖任何
       # 外部定时器，也不需要人工干预。单独补跑见 prune-releases.yml。
       # ⚠ 必须放在 Release 创建/更新之后：它会按 created_at 倒序裁掉尾部。
       - name: Prune old releases (keep newest 5)

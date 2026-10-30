@@ -14,6 +14,10 @@
 #   FEED_DIR      feed 根目录（挂到 /feed）
 #   ARTIFACTS_DIR 产物目录（挂到 /artifacts）
 #   V / INDEX / BUILD_LOG / KEY_BUILD  透传给 entrypoint
+#   GO_CACHE_DIR  可选。设置后把宿主机的 $GO_CACHE_DIR/build 与 /mod 分别挂到
+#                 容器的 /builder/tmp/go-build（GOCACHE）与 /builder/dl/go-mod-cache
+#                 （GOMODCACHE），Go 编译缓存跨 run 复用（golang-values.mk：
+#                 GO_BUILD_CACHE_DIR=$(TMP_DIR)/go-build，GO_MOD_CACHE_DIR=$(DL_DIR)/go-mod-cache）。
 set -e
 
 : "${ARCH:?ARCH 未设置}"
@@ -31,6 +35,17 @@ fi
 # 容器内是 uid 1000，宿主目录先交出去，否则 entrypoint 写不了 dl/ 与 bin/。
 sudo chown -R 1000:1000 "${FEED_DIR}" "${ARTIFACTS_DIR}"
 
+# Go 缓存挂载：目录同样要交给容器内的 uid 1000。
+GO_MOUNTS=()
+if [ -n "${GO_CACHE_DIR:-}" ]; then
+	sudo mkdir -p "${GO_CACHE_DIR}/build" "${GO_CACHE_DIR}/mod"
+	sudo chown -R 1000:1000 "${GO_CACHE_DIR}"
+	GO_MOUNTS=(
+		-v "${GO_CACHE_DIR}/build:/builder/tmp/go-build"
+		-v "${GO_CACHE_DIR}/mod:/builder/dl/go-mod-cache"
+	)
+fi
+
 # FIXUP=1：make check 发现 HASH 非 64 位 sha256 时，调 fixup-makefile.pl 就地
 # 改正并视为通过（只改容器内的 /feed 副本，不回写仓库）。
 docker run --rm \
@@ -45,8 +60,15 @@ docker run --rm \
 	-v "${FEED_DIR}:/feed" \
 	-v "${ARTIFACTS_DIR}:/artifacts" \
 	-v "${ENTRYPOINT}:/entrypoint.sh:ro" \
+	"${GO_MOUNTS[@]}" \
 	--entrypoint /entrypoint.sh \
 	"ghcr.io/openwrt/sdk:${ARCH}"
+
+# Go 缓存目录物归原主：容器内产物属主是 1000，后续 actions/cache 的 post-save
+# 以 runner 用户打包，属主不一致虽通常只读也能成，但统一起来省得排查。
+if [ -n "${GO_CACHE_DIR:-}" ]; then
+	sudo chown -R "$(id -u):$(id -g)" "${GO_CACHE_DIR}"
+fi
 
 # 产物归还原主：容器内以 root 编译，产物属主是 root；后面的 git 操作会报
 # dubious ownership，upload-artifact 也可能读不到。
