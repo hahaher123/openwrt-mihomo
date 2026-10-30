@@ -72,6 +72,15 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 > [!NOTE]
 > 导入 / 更新依赖路由器能直连订阅地址；若订阅需经代理访问，请先配置好网络出口。下载优先用 `curl`（超时与重试内置），失败原因会归纳为一句中文提示；若返回的是网页或 `ss:// vmess://` 节点列表，请改用机场的 Clash 订阅地址（常见做法是链接后加 `&flag=clash`）。
 
+### HTTPS 环境说明（后台管理完整功能）
+
+完整功能 = LuCI「后台管理」页的内嵌仪表盘在 http/https 下都能直接用并连上 API，依赖 **nginx 链路**（`nginx-ssl` + `luci-nginx`）：
+
+- **本包自带反代**：`/etc/nginx/conf.d/luci-app-mihomo.locations` 把 `/mihomo-ui/` 反代到 `127.0.0.1:9090/ui/`，并把 mihomo 的 REST/WS 根端点（`/version`、`/configs`、`/proxies`、`/traffic`、`/logs` 等）转发到 9090——后者是必需的：metacubexd 面板的后端地址留空时回落 `window.location.origin`，API 请求会直接打到 nginx 根路径。文件被 `_lan` server 的 `include conf.d/*.locations` 引入，80 / 443 同份生效；uci-defaults 在安装/升级后自动 restart nginx。
+- **默认入口**：uci-defaults 首次安装把 `mihomo.main.dashboard` 设为 `/mihomo-ui/`（已在「运行参数」自定义过则不动；uhttpd 环境没有 nginx，跳过不写）。
+- **面板内连后端**（一次即可，面板存在 localStorage）：metacubexd「设置」→ 后端地址填 `https://<路由器地址>`（走 nginx 443，**不要填 `:9090`**——external-controller 只讲 HTTP 不讲 TLS，`https://…:9090` 握手必败），密钥填 `/etc/mihomo/config.yaml` 里的 `secret`。
+- **uhttpd 链路**：反代与默认值均不生效，dashboard 保持默认 `http://<路由器>:9090/ui` 直连，页面走 http 时内嵌可用；走 https 会被浏览器混合内容拦截，属预期。
+
 ## 透明代理（nft REDIRECT + TPROXY 混合模式）
 
 **不使用 TUN 模式**，不需要 `tun:` 配置块与 `auto-redirect`：init.d 在 mihomo 启动前加载 `/etc/mihomo/clash.nft`（独立表 `inet clash`），服务停止时自动移除，转发流量与路由器自身流量均覆盖：
