@@ -50,6 +50,8 @@ jobs:
   check:
     name: 探测上游并跟进
     runs-on: ubuntu-latest
+    outputs:
+      newer: ${{ steps.probe.outputs.newer }}
     steps:
       - name: Checkout source tree
         uses: actions/checkout@v6
@@ -137,3 +139,51 @@ jobs:
         if: steps.probe.outputs.newer != 'true' && !inputs.force
         run: |
           echo "上游与 Makefile 版本一致或更旧，本次不做改动。"
+
+  # 缓存保活：上游没升级（也没 force）时不触发 build.yml，两份 Go 编译缓存
+  # （GOCACHE / GOMODCACHE）就不会被任何构建访问 —— 而 GitHub 的 Actions 缓存
+  # 按「最后访问时间」7 天不访问即驱逐，mihomo 上游发版间隔一旦超过一周，
+  # 下次跟进版本就要全量冷编译（重下全部 Go 模块 + 重编全部依赖包）。
+  # 这里在不构建的日子里用 cache/restore（只恢复、不回存）把缓存各摸一次，
+  # 刷新驱逐时钟；真正的升级构建走 build.yml，天然会恢复缓存，不需要本 job。
+  # ⚠ 缓存条目的版本哈希由 key + 路径列表 + 压缩工具共同决定，路径列表必须
+  # 与 build.yml 的 cache path 逐字节一致（含相对路径），否则 key 相同也静默 miss。
+  # ⚠ restore-keys 里的 SDK 版本与 build.yml 的 OPENWRT_VERSION（'25.12.6'）保持
+  # 一致 —— build.yml 升 SDK 版本时这里要同步改。
+  keepalive:
+    name: keep Go caches warm (${{ matrix.arch }})
+    needs: check
+    if: needs.check.outputs.newer != 'true' && github.event.inputs.force != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 build.yml 的 build matrix 保持一致。
+        arch: [x86_64, aarch64_generic]
+    steps:
+      # restore 动作本身即刷新 7 天驱逐时钟。key 故意永不匹配，靠 restore-keys
+      # 前缀命中现有缓存；restore-only 不回存，不新增条目。
+      - name: Touch Go build cache (GOCACHE)
+        uses: actions/cache/restore@v4
+        with:
+          path: go-cache/build
+          key: keepalive-gocache-${{ matrix.arch }}-${{ github.run_id }}
+          restore-keys: gocache-${{ matrix.arch }}-25.12.6-
+
+      - name: Touch Go module cache (GOMODCACHE)
+        uses: actions/cache/restore@v4
+        with:
+          path: go-cache/mod
+          key: keepalive-gomod-${{ matrix.arch }}-${{ github.run_id }}
+          restore-keys: gomod-${{ matrix.arch }}-25.12.6-
+
+      - name: Summary
+        run: |
+          {
+            echo "### Cache keepalive (\`${{ matrix.arch }}\`)"
+            echo ''
+            echo '上游无新版本，未构建；已恢复 Go 编译缓存刷新 7 天驱逐时钟（不发 Release）。'
+          } >> "$GITHUB_STEP_SUMMARY"
