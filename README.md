@@ -46,7 +46,7 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 | 运行参数 | 编辑 `/etc/config/mihomo`：enabled、conffile、workdir、user、ifaces、日志开关、dashboard；保存并应用即重启生效 |
 | 透明代理 | 开关透明代理（启动前加载策略路由与 nft 规则，停止时移除）；在线编辑 `tproxy.sh` / `clash.nft`；一键检查规则状态 |
 | 配置文件 | 列出 / 编辑 / 校验 / 切换 workdir 下的配置文件；远程导入订阅；仅更新与定时更新服务器和代理组 |
-| 后台管理 | 内嵌 external-ui 仪表盘（metacubexd / yacd 等），默认 `http://<路由器>:9090/ui` |
+| 后台管理 | 内嵌 external-ui 仪表盘（metacubexd / yacd 等），默认走同源反代 `/mihomo-ui/`（nginx locations 随包自带，http/https 自适应，https 下不被浏览器混合内容策略拦截）；可在「运行参数」页改回直连地址（如 `http://<路由器>:9090/ui`） |
 
 **启动输出与排障**（`/etc/init.d/mihomo`）：
 

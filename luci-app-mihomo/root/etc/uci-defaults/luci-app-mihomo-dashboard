@@ -1,0 +1,15 @@
+#!/bin/sh
+# 面板默认走同源反代 /mihomo-ui/（nginx locations 由本包自带）：
+# 相对路径自动继承页面协议，https 下不再被浏览器混合内容策略拦截。
+# 仅在用户未自定义 dashboard 时写入；已设置（含升级前手工改过）则不动。
+# uhttpd 环境没有 nginx，反代不可用，保持上游默认不写。
+[ -x /etc/init.d/nginx ] || exit 0
+
+if [ -z "$(uci -q get mihomo.main.dashboard)" ]; then
+	[ -f /etc/config/mihomo ] || touch /etc/config/mihomo
+	uci -q set mihomo.main=main
+	uci set mihomo.main.dashboard='/mihomo-ui/'
+	uci commit mihomo
+fi
+
+exit 0

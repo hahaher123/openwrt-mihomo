@@ -7,8 +7,8 @@ include $(TOPDIR)/rules.mk
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Leo Douglas <douglarek@gmail.com>
 
-PKG_VERSION:=1.0.5
-PKG_RELEASE:=3
+PKG_VERSION:=1.0.6
+PKG_RELEASE:=1
 
 LUCI_TITLE:=LuCI support for Mihomo
 # "+mihomo" is a hard dependency: building/installing luci-app-mihomo
