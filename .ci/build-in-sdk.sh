@@ -15,9 +15,10 @@
 #   ARTIFACTS_DIR 产物目录（挂到 /artifacts）
 #   V / INDEX / BUILD_LOG / KEY_BUILD  透传给 entrypoint
 #   GO_CACHE_DIR  可选。设置后把宿主机的 $GO_CACHE_DIR/build 与 /mod 分别挂到
-#                 容器的 /builder/tmp/go-build（GOCACHE）与 /builder/dl/go-mod-cache
-#                 （GOMODCACHE），Go 编译缓存跨 run 复用（golang-values.mk：
-#                 GO_BUILD_CACHE_DIR=$(TMP_DIR)/go-build，GO_MOD_CACHE_DIR=$(DL_DIR)/go-mod-cache）。
+#                 容器的 /gocache 与 /gomodcache，并用 MAKEFLAGS 把
+#                 GO_BUILD_CACHE_DIR / GO_MOD_CACHE_DIR 指过去（Go 编译缓存跨
+#                 run 复用；默认值在 golang-values.mk：$(TMP_DIR)/go-build 与
+#                 $(DL_DIR)/go-mod-cache，不能直接挂那两个位置，见下方注释）。
 set -e
 
 : "${ARCH:?ARCH 未设置}"
@@ -36,14 +37,24 @@ fi
 sudo chown -R 1000:1000 "${FEED_DIR}" "${ARTIFACTS_DIR}"
 
 # Go 缓存挂载：目录同样要交给容器内的 uid 1000。
+#
+# ⚠ 挂载点不能放 /builder/tmp 与 /builder/dl 之下：docker 会为容器侧挂载路径
+# MkdirAll 自动创建缺失的父目录（root 属主），而容器以 uid 1000 运行 —— SDK
+# tar 解包时 tmp/ 与 dl/ 条目被静默跳过，make 预检写 /builder/tmp/a.out 直接
+# 失败（working-gcc 静默 failed，2026-10-30 run 40985847997 两架构实证）。
+# 因此挂到顶层路径，再用 MAKEFLAGS 命令行变量覆盖 golang-values.mk 的
+# GO_BUILD_CACHE_DIR / GO_MOD_CACHE_DIR（两者都是 := 定义，只有命令行变量能压过；
+# MAKEFLAGS 里的 VAR=value 等价命令行定义，自动传给所有子 make）。
 GO_MOUNTS=()
+GO_ENV=()
 if [ -n "${GO_CACHE_DIR:-}" ]; then
 	sudo mkdir -p "${GO_CACHE_DIR}/build" "${GO_CACHE_DIR}/mod"
 	sudo chown -R 1000:1000 "${GO_CACHE_DIR}"
 	GO_MOUNTS=(
-		-v "${GO_CACHE_DIR}/build:/builder/tmp/go-build"
-		-v "${GO_CACHE_DIR}/mod:/builder/dl/go-mod-cache"
+		-v "${GO_CACHE_DIR}/build:/gocache"
+		-v "${GO_CACHE_DIR}/mod:/gomodcache"
 	)
+	GO_ENV=(--env "MAKEFLAGS=GO_BUILD_CACHE_DIR=/gocache GO_MOD_CACHE_DIR=/gomodcache")
 fi
 
 # FIXUP=1：make check 发现 HASH 非 64 位 sha256 时，调 fixup-makefile.pl 就地
@@ -61,6 +72,7 @@ docker run --rm \
 	-v "${ARTIFACTS_DIR}:/artifacts" \
 	-v "${ENTRYPOINT}:/entrypoint.sh:ro" \
 	"${GO_MOUNTS[@]}" \
+	"${GO_ENV[@]}" \
 	--entrypoint /entrypoint.sh \
 	"ghcr.io/openwrt/sdk:${ARCH}"
 
