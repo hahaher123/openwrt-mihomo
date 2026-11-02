@@ -49,6 +49,47 @@ var CHECK_FILE = '/tmp/mihomo-config-check.yaml';
 // 里那条 "/tmp/mihomo-config-upload.*" 一致。
 var STAGE_PREFIX = '/tmp/mihomo-config-upload.';
 
+// 确认框。luci-base 没有 ui.confirm 这个 API (25.12.6 的 ui.js 全文无此方法,
+// 也不能指望未来版本永远有), 所以先做特性检测: 有官方的就用官方的, 没有就用
+// ui.showModal 自建一个等价的 Promise<boolean> 确认框。
+// 为什么必须封装而不能直接调: 按钮是 ui.createHandlerFn 接的, 它先把按钮标成
+// spinning 再执行回调, 回调里同步抛 TypeError (ui.confirm is not a function)
+// 时 finally 永远不会执行, 按钮就会永久转圈 —— 删除按钮第一次上真机就是这个病。
+// 细节: ui.showModal 的 Esc 处理 (cancelModal) 会去点 .button-row 里的第一个
+// 按钮, 所以把「取消」放在第一位 —— 误按 Esc 不该触发破坏性动作。
+var confirmDialog = function(msg) {
+	if (typeof ui.confirm == 'function')
+		return ui.confirm(msg);
+
+	return new Promise(function(resolve) {
+		var done = function(ok) {
+			ui.hideModal();
+			resolve(ok);
+		};
+
+		ui.showModal(_('请确认'), [
+			E('p', { 'style': 'margin-bottom:1em; word-break:break-all;' }, [ msg ]),
+			E('div', { 'class': 'button-row' }, [
+				E('button', {
+					'class': 'btn cbi-button',
+					'click': function(ev) {
+						ev.preventDefault();
+						done(false);
+					}
+				}, [ _('取消') ]),
+				' ',
+				E('button', {
+					'class': 'btn cbi-button cbi-button-negative important',
+					'click': function(ev) {
+						ev.preventDefault();
+						done(true);
+					}
+				}, [ _('确定') ])
+			])
+		]);
+	});
+};
+
 // 分块直接走 rpcd 的 file.write: 它比 fs.write 多一个 append 参数, 可以把各块
 // 依次追加进同一个文件。而 fs.write 是把整份内容一次性塞进一个请求体 —— 那正是
 // 要避开的东西 (见 upload.js 的说明)。
@@ -650,9 +691,9 @@ return view.extend({
 			return fs.list(self.cfg().workdir).then(function(entries) {
 				var exists = self.sortedNames(entries).some(function(n) { return n.name == name; });
 
-				return (exists
-					? ui.confirm(_('%1$s 已存在, 上传将覆盖它 (覆盖前仍会通过 mihomo -t 校验)。确定继续吗?').format(target))
-					: Promise.resolve(true)).then(function(ok) {
+			return (exists
+				? confirmDialog(_('%1$s 已存在, 上传将覆盖它 (覆盖前仍会通过 mihomo -t 校验)。确定继续吗?').format(target))
+				: Promise.resolve(true)).then(function(ok) {
 					if (!ok)
 						return;
 
@@ -681,8 +722,8 @@ return view.extend({
 	// ---------------- 动作: 删除选中的配置 ----------------
 
 	// 删除走 config.sh remove: 文件名规范化、当前生效配置拒删、清理 sources
-	// 里的订阅记录都在服务端完成, 页面只负责确认与展示。确认用 ui.confirm
-	// (浏览器原生 confirm 的 Promise 封装), 删错了没法后悔, 这一步不能省。
+	// 里的订阅记录都在服务端完成, 页面只负责确认与展示。确认框见模块头部的
+	// confirmDialog (luci-base 无 ui.confirm, 自建 showModal 兜底)。
 	handleDeleteCfg: function(ev) {
 		var self = this;
 		var name = this.selected;
@@ -694,7 +735,7 @@ return view.extend({
 
 		var path = this.pathOf(name);
 
-		return ui.confirm(_('确定删除配置文件 %s 吗? 此操作不可恢复: 文件与其记录的订阅链接会被一并移除。').format(path))
+		return confirmDialog(_('确定删除配置文件 %s 吗? 此操作不可恢复: 文件与其记录的订阅链接会被一并移除。').format(path))
 			.then(function(ok) {
 				if (!ok)
 					return;
