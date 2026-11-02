@@ -17,6 +17,12 @@
 #                                           service is left alone; when they
 #                                           differ the file is updated and
 #                                           mihomo is restarted.
+#   config.sh remove <name>                 delete a profile from the work
+#                                           directory and drop its recorded
+#                                           subscription URL. The live config
+#                                           (uci mihomo.main.conffile) is
+#                                           always refused; switch to another
+#                                           profile first.
 #   config.sh help
 #
 # Only the network facing part lives here plus the "install" step for edited
@@ -69,6 +75,7 @@ usage() {
 Usage: $0 import <url> [name] [force]
        $0 install <src> <name>
        $0 update <name> [url]
+       $0 remove <name>
        $0 help
 
   import  url     remote profile URL (http/https)
@@ -88,6 +95,13 @@ Usage: $0 import <url> [name] [force]
                   should be refreshed
           url     subscription URL; when omitted the URL recorded for that
                   profile (see <workdir>/sources) is used
+
+  remove  name    profile to delete from the work directory. The currently
+                  selected config (uci mihomo.main.conffile) is refused; its
+                  recorded subscription URL is dropped as well. When the
+                  scheduled update targets this profile a warning is printed
+                  (the cron job would fail on the next run until the target
+                  is changed or the schedule is disabled).
 
 Everything downloaded or staged is validated with "mihomo -t" before it
 replaces anything on disk, and the replacement happens through a rename inside
@@ -747,6 +761,67 @@ do_install() {
 }
 
 # ---------------------------------------------------------------------------
+# 命令: remove  (删除一份配置文件, 连同它记录的订阅链接)
+# ---------------------------------------------------------------------------
+
+# 页面「删除选中的配置」的服务端收口。删除是破坏性操作, 这里负责三道闸:
+#   1. 文件名走 normalize_name —— 与 import/install/update 同一条门, 路径穿越、
+#      隐藏文件、非法字符进不来;
+#   2. 当前生效的配置 (uci mihomo.main.conffile) 一律拒删 —— 删了它服务下次
+#      启动就找不到配置, 页面上必须先切到别的配置再来删;
+#   3. 只删 <workdir> 下确认存在的那个文件, 其它文件一概不碰。
+# 删除成功后顺手把 <workdir>/sources 里该文件的订阅记录清掉: 文件都没了, 留着
+# 一条指向已删文件的链接只会在「仅更新」里造成混乱。
+do_remove() {
+	local name="$1" target t
+
+	[ -n "$name" ] || die "缺少配置文件名"
+
+	normalize_name "$name"
+	name="$NAME"
+	target="$WORKDIR/$name"
+
+	[ -f "$target" ] || die "删除 $name 失败: 配置文件不存在 ($target)"
+
+	if [ "$target" = "$CONFFILE" ]; then
+		die "删除 $name 失败: 它是当前生效的配置 (uci mihomo.main.conffile = $CONFFILE), 请先选中其它配置并\"设为当前配置\"后再删除"
+	fi
+
+	if ! rm -f "$target"; then
+		die "删除 $name 失败: 无法删除 $target"
+	fi
+
+	# 清掉 sources 里该文件的记录; 没有记录或临时文件写失败时保持安静 ——
+	# 主目标 (删文件) 已达成, 别让收尾工作把整条命令拖成失败。
+	if [ -f "$SOURCES" ]; then
+		t="$WORKDIR/.sources.$$"
+		if awk -v n="$name" '$1 != n' "$SOURCES" > "$t" 2>/dev/null; then
+			chmod 600 "$t" 2>/dev/null
+			mv -f "$t" "$SOURCES" 2>/dev/null || rm -f "$t"
+		else
+			rm -f "$t"
+		fi
+	fi
+
+	echo "== 完成 =="
+	echo "已删除: $target"
+	echo "已清除它记录的订阅链接 (若有)"
+
+	# 定时更新的目标若是刚删的文件, 下次 cron 一跑就会报「配置文件不存在」。
+	# 只提醒, 不代改 uci: 关闭/改选是页面上的明确动作, 脚本擅自改会掩盖问题。
+	if command -v uci >/dev/null 2>&1; then
+		local atarget
+		atarget=$(uci -q get mihomo.@autoupdate[0].target 2>/dev/null)
+		if [ "$atarget" = "$name" ]; then
+			echo
+			echo "注意: 「定时更新」的目标正是刚删除的 $name,"
+			echo "下次计划任务执行时会因找不到文件而失败。"
+			echo "请在配置页面上关闭定时更新或改选其它目标配置。"
+		fi
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # 命令: update  (只替换 proxies / proxy-groups 两段, 其余内容原样保留)
 # ---------------------------------------------------------------------------
 
@@ -991,6 +1066,10 @@ case "$cmd" in
 	update)
 		load_config
 		do_update "$1" "$2"
+		;;
+	remove)
+		load_config
+		do_remove "$1"
 		;;
 	help|-h|--help|"")
 		usage

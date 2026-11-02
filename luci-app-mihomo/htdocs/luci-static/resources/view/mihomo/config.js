@@ -11,8 +11,12 @@
 //
 // - 列出 workdir 下的 *.yaml/*.yml, 可选中其中一个作为当前运行配置
 //   (写入 uci mihomo.main.conffile, 与 /etc/init.d/mihomo 读的是同一项)
+// - 删除选中的配置文件: 页面确认后由 /etc/mihomo/config.sh remove 完成,
+//   文件与其记录的订阅链接一并移除; 当前生效的配置服务端一律拒删
 // - 从远程 URL 导入 clash/mihomo 订阅, 先校验再落盘
 //   (由 /etc/mihomo/config.sh import 完成, 下载到 /tmp 校验通过后才安装)
+// - 上传本机的 .yaml/.yml 配置文件: 内容在浏览器里读出后与编辑保存走同一条
+//   分块上传链路, 由 config.sh install 校验并原子装入 workdir
 // - 仅更新服务器和代理组: 按订阅链接重新拉取, 只替换选中配置里的
 //   proxies / proxy-groups 两段, 其余设置与手动修改都保持不动
 //   (由 /etc/mihomo/config.sh update 完成)
@@ -269,6 +273,28 @@ return view.extend({
 				return { ok: true, pending: !last, stored: true };
 			});
 		}, onProgress);
+	},
+
+	// 保存与上传共用的暂存协议: 把一份完整内容经 upload.js 分块写进 /tmp 的
+	// 暂存文件。暂存名带 upload_id: 两次写入不会撞同一个文件, 也不用担心上一
+	// 次中断留下的同名文件被续写; 第一块 append=false 负责截断重建。成功时回包
+	// { ok: true, stage }, 失败时 { ok: false, message }, 横幅怎么写由调用方定。
+	stageText: function(content, name, onProgress) {
+		var self = this;
+		var stage = null;
+
+		return chunkedUpload.uploadText(content, function(chunk, last, uploadId) {
+			stage = STAGE_PREFIX + name + '.' + uploadId;
+
+			return callFileAppend(stage, self.chunkText(chunk), chunk.offset > 0, 384).then(function() {
+				return { ok: true, pending: !last, stored: true };
+			});
+		}, onProgress).then(function(result) {
+			if (!result || result.ok === false)
+				return { ok: false, message: (result && (result.message || result.code)) || '?' };
+
+			return { ok: true, stage: stage };
+		});
 	},
 
 	// 跑一次上游校验器。注意 fs.exec 在命令退出码非 0 时不会 reject, 必须自己看 code。
@@ -586,6 +612,125 @@ return view.extend({
 		});
 	},
 
+	// ---------------- 动作: 上传本地配置文件 ----------------
+
+	// 本机文件在浏览器里用 file.text() 读成文本 (配置是 YAML, 不存在二进制),
+	// 之后与「保存」走完全相同的链路: 分块写 /tmp 暂存 -> config.sh install
+	// 复校 mihomo -t -> 原子装入 workdir。install 对已存在的目标就是替换语义,
+	// 所以 workdir 里已有同名配置时先弹确认, 避免一键覆盖掉手动改过的订阅。
+	handleUploadCfg: function(ev) {
+		var self = this;
+		var input = this.fileInput;
+		var files = (input && input.files) || [];
+		var file = files[0];
+
+		if (!file) {
+			this.setResult('warn', _('请先选择要上传的配置文件'), '');
+			return Promise.resolve();
+		}
+
+		var name = file.name;
+
+		// 服务端 normalize_name 只认 .yaml/.yml 与有限字符集, 后缀在页面上
+		// 先拦一次, 给出比脚本更直接的提示
+		if (!isConfigName(name)) {
+			this.setResult('warn', _('只支持 .yaml / .yml 后缀的配置文件'),
+				_('选择的文件: %s').format(name));
+			return Promise.resolve();
+		}
+
+		return file.text().then(function(content) {
+			if (!content.length) {
+				self.setResult('warn', _('文件内容为空, 未上传'), name);
+				return;
+			}
+
+			var target = self.pathOf(name);
+
+			return fs.list(self.cfg().workdir).then(function(entries) {
+				var exists = self.sortedNames(entries).some(function(n) { return n.name == name; });
+
+				return (exists
+					? ui.confirm(_('%1$s 已存在, 上传将覆盖它 (覆盖前仍会通过 mihomo -t 校验)。确定继续吗?').format(target))
+					: Promise.resolve(true)).then(function(ok) {
+					if (!ok)
+						return;
+
+					self.setResult('info', _('正在上传 %s…'), name, true);
+
+					return self.stageText(content, name, self.progressReporter(_('正在上传…'))).then(function(up) {
+						if (!up.ok) {
+							self.setResult('err', _('上传失败'),
+								_('内容分块上传失败: %s').format(up.message));
+							return;
+						}
+
+						return self.installStaged(up.stage, name, target, false, _('上传成功'));
+					}, function(e) {
+						self.setResult('err', _('上传失败'), String(e.message || e));
+					});
+				});
+			}, function(e) {
+				self.setResult('err', _('读取目录失败'), String(e.message || e));
+			});
+		}, function(e) {
+			self.setResult('err', _('读取本地文件失败'), String(e.message || e));
+		});
+	},
+
+	// ---------------- 动作: 删除选中的配置 ----------------
+
+	// 删除走 config.sh remove: 文件名规范化、当前生效配置拒删、清理 sources
+	// 里的订阅记录都在服务端完成, 页面只负责确认与展示。确认用 ui.confirm
+	// (浏览器原生 confirm 的 Promise 封装), 删错了没法后悔, 这一步不能省。
+	handleDeleteCfg: function(ev) {
+		var self = this;
+		var name = this.selected;
+
+		if (!name) {
+			this.setResult('warn', _('请先在上面的列表中选择要删除的配置文件'), '');
+			return Promise.resolve();
+		}
+
+		var path = this.pathOf(name);
+
+		return ui.confirm(_('确定删除配置文件 %s 吗? 此操作不可恢复: 文件与其记录的订阅链接会被一并移除。').format(path))
+			.then(function(ok) {
+				if (!ok)
+					return;
+
+				self.setResult('info', _('正在删除…'), path, true);
+
+				return fs.exec(HELPER, [ 'remove', name ]).then(function(res) {
+					var done = (res && res.code == 0);
+					var out = joinOutput(res) || _('(无输出)');
+
+					if (!done) {
+						self.setResult('err', _('删除失败 (退出码 %s)').format(res ? res.code : '?'), out);
+						return;
+					}
+
+					// 删的就是正在编辑的那份: 清掉编辑区, 让 refreshList 重选
+					if (self.selected == name) {
+						self.selected = null;
+						self.ta.value = '';
+					}
+
+					self.setResult('ok', _('已删除配置文件'), out);
+
+					return self.refreshList().then(function() {
+						return self.reloadSource();
+					}).then(function() {
+						if (self.selected)
+							return self.handlePick(self.selected);
+					});
+				}, function(e) {
+					// 权限不足等 RPC 级失败走这里, 此时没有 code 可看
+					self.setResult('err', _('删除无法执行'), String(e.message || e));
+				});
+			});
+	},
+
 	// ---------------- 动作: 选择运行配置 ----------------
 
 	doApplyConfig: function(restart) {
@@ -683,26 +828,17 @@ return view.extend({
 
 		var c = this.cfg();
 		var path = this.pathOf(name);
-		var stage = null;
 
 		this.setResult('info', _('正在保存…'), '', true);
 
-		var upload = chunkedUpload.uploadText(this.ta.value, function(chunk, last, uploadId) {
-			/* 暂存名里带 upload_id: 两次保存不会撞同一个文件, 也不用担心上一次
-			 * 中断留下的同名文件被续写。 */
-			stage = STAGE_PREFIX + name + '.' + uploadId;
-
-			return callFileAppend(stage, self.chunkText(chunk), chunk.offset > 0, 384).then(function() {
-				return { ok: true, pending: !last, stored: true };
-			});
-		}, this.progressReporter(_('正在保存…')));
-
-		return upload.then(function(result) {
-			if (!result || result.ok === false) {
+		return this.stageText(this.ta.value, name, this.progressReporter(_('正在保存…'))).then(function(up) {
+			if (!up.ok) {
 				self.setResult('err', _('保存失败'),
-					_('内容分块上传失败: %s').format((result && (result.message || result.code)) || '?'));
+					_('内容分块上传失败: %s').format(up.message));
 				return;
 			}
+
+			var stage = up.stage;
 
 			self.setResult('info', _('正在校验…'), '', true);
 
@@ -725,8 +861,8 @@ return view.extend({
 
 	// 把已校验过的暂存文件装进 workdir (走 config.sh install: 它会自己再校一遍
 	// —— 暂存文件在 /tmp 里躺着, 这期间别的进程能改它 —— 然后按 rename 换成
-	// 目标文件), 必要时重启服务。
-	installStaged: function(stage, name, path, restart) {
+	// 目标文件), 必要时重启服务。okTitle 是成功横幅的标题 (保存/上传共用这条链)。
+	installStaged: function(stage, name, path, restart, okTitle) {
 		var self = this;
 
 		this.setResult('info', _('正在写入…'), '', true);
@@ -743,7 +879,7 @@ return view.extend({
 			}
 
 			if (!restart) {
-				self.setResult('ok', _('保存成功'),
+				self.setResult('ok', okTitle || _('保存成功'),
 					path + '\n' + _('校验已通过, 重启 mihomo 服务后生效。'));
 				return self.refreshList();
 			}
@@ -1108,6 +1244,13 @@ return view.extend({
 
 		this.forceBox = E('input', { 'type': 'checkbox' }, []);
 
+		// ---- 上传本地配置文件 ----
+		this.fileInput = E('input', {
+			'type': 'file',
+			'accept': '.yaml,.yml',
+			'style': 'padding:5px; border:1px solid #e2e2e2; border-radius:6px; background:#fff;'
+		}, []);
+
 		// ---- 仅更新表单 ----
 		this.updInfo = E('div', {
 			'style': 'margin:10px 0; padding:8px 10px; border-left:4px solid #1565c0; background:#e8f0fe; color:#0d47a1; border-radius:6px; font-size:0.92em;'
@@ -1216,6 +1359,15 @@ return view.extend({
 				btn(_('导入'), 'handleImport')
 			]),
 
+			E('h3', {}, [ _('上传本地配置文件') ]),
+			E('div', { 'class': 'cbi-map-descr' }, [
+				_('把本机的 .yaml/.yml 配置文件上传到 %s。内容与「保存」走同一条链路: 分块暂存到 /tmp, mihomo -t 校验通过后才写入; workdir 里已有同名配置时会先确认再覆盖。').format(c.workdir)
+			]),
+			E('div', { 'style': 'display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:10px 0;' }, [
+				this.fileInput,
+				btn(_('上传'), 'handleUploadCfg')
+			]),
+
 			E('h3', {}, [ _('选择用于运行的配置') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
 				_('选中一项后可设为当前生效配置; 「设为当前配置」只改 uci, 「设为当前配置并重启」会同时重启服务。')
@@ -1223,7 +1375,8 @@ return view.extend({
 			E('div', { 'style': 'margin:10px 0;' }, [ this.listBox ]),
 			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap;' }, [
 				btn(_('设为当前配置'), 'handleSetConfig', 'cbi-button'),
-				btn(_('设为当前配置并重启'), 'handleSetConfigRestart')
+				btn(_('设为当前配置并重启'), 'handleSetConfigRestart'),
+				btn(_('删除选中的配置'), 'handleDeleteCfg', 'cbi-button cbi-button-remove')
 			]),
 
 			E('h3', {}, [ _('仅更新服务器和代理组') ]),
