@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # mihomo tproxy route setup (managed by /etc/init.d/mihomo and luci-app-mihomo)
 # Usage: tproxy.sh start|stop
 # Adds/removes the fwmark policy route used by mihomo TPROXY mode.

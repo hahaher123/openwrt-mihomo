@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # 面板默认走同源反代 /mihomo-ui/（nginx locations 由本包自带）：
 # 相对路径自动继承页面协议，https 下不再被浏览器混合内容策略拦截。
 # 仅在用户未自定义 dashboard 时写入；已设置（含升级前手工改过）则不动。

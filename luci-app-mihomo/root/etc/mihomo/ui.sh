@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # mihomo 外部面板 (external-ui / metacubexd 等) 安装器。
 #
 #   ui.sh status            打印机器可读的状态 (页面轮询用, 很快)

@@ -59,7 +59,7 @@ define Package/mihomo
   # /usr/share/v2ray/{geoip.dat,geosite.dat} 不再由 v2ray-geoip / v2ray-geosite
   # 提供：整机镜像里它们是 FILES 覆盖层的一部分（构建时从 Loyalsoldier 下载），
   # 由 oxidns 负责刷新，本包只通过软链接消费（见 Package/mihomo/install）。
-  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun +kmod-inet-diag +kmod-netlink-diag
+  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun +kmod-inet-diag +kmod-netlink-diag +bash
 endef
 
 define Package/mihomo/description

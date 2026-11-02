@@ -27,7 +27,7 @@ LUCI_TITLE:=LuCI support for Mihomo
 # dashboard is shipped as a zip (metacubexd gh-pages). busybox usually has
 # the unzip applet disabled, and mihomo itself can only unzip the UI it
 # downloads on its own, so the package has to pull a real unzip.
-LUCI_DEPENDS:=+luci-base +mihomo +curl +unzip
+LUCI_DEPENDS:=+luci-base +mihomo +curl +unzip +bash
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk

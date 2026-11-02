@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # mihomo configuration manager.
 #
 #   config.sh import <url> [name] [force]   download a remote clash/mihomo

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # 定时更新 mihomo 的「服务器与代理组」。
 #
 # 实际动作全部交给 config.sh update: 它只替换 proxies / proxy-groups 两段, 并且

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # mihomo 运行日志的查看与维护（LuCI「运行状态」页的日志面板调用本脚本）。
 #
 #   log.sh status            打印 file / exists / size / max_kb / lines, 供页面显示
