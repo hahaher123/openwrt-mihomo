@@ -27,7 +27,36 @@ table inet clash {
 		             1.1.1.1/32,
 		             1.0.0.1/32,
 		             8.8.8.8/32,
-		             8.8.4.4/32 }
+		             8.8.4.4/32,
+		             9.9.9.9/32,
+		             149.112.112.112/32,
+		             94.140.14.14/32,
+		             94.140.15.15/32,
+		             162.159.192.0/24,
+		             162.159.193.0/24,
+		             162.159.195.0/24 }
+	}
+
+	# Hardcoded-IP destinations whose IPv6 cannot be proxied (proxy nodes
+	# are v4-only): dropped instead, so clients fall back to their IPv4
+	# endpoints which are caught by proxy_ip above.
+	set block_ip6 {
+		type ipv6_addr
+		flags interval
+		elements = { 2001:b28:f23c::/48,
+		             2001:b28:f23d::/48,
+		             2001:b28:f23f::/48,
+		             2001:67c:4e8::/48,
+		             2a0a:f280::/32,
+		             2606:4700:4700::1111/128,
+		             2606:4700:4700::1001/128,
+		             2001:4860:4860::8888/128,
+		             2001:4860:4860::8844/128,
+		             2620:fe::fe/128,
+		             2620:fe::9/128,
+		             2a10:50c0::ad1:ff/128,
+		             2a10:50c0::ad2:ff/128,
+		             2606:4700:110::/48 }
 	}
 
 	set private {
@@ -60,6 +89,7 @@ table inet clash {
 
 	chain filter_prerouting {
 		type filter hook prerouting priority filter; policy accept;
+		ip6 daddr @block_ip6 counter drop comment "block-ip6"
 		ip daddr @proxy_ip ip protocol udp jump clashproxy_udp
 		return
 	}
@@ -75,6 +105,7 @@ table inet clash {
 	# the filter_prerouting tproxy above
 	chain filter_output {
 		type route hook output priority 0; policy accept;
+		ip6 daddr @block_ip6 counter drop comment "block-ip6"
 		ip daddr @proxy_ip ip protocol udp meta mark set 0x100 counter accept comment "reroute-udp"
 		return
 	}
