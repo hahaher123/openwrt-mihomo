@@ -46,11 +46,11 @@ function getVersion() {
 /* -- 运行日志 ---------------------------------------------------------------
  * 数据源是落盘文件 (uci mihomo.main.log_file), 不是 logread: 系统日志是环形
  * 缓冲、会被别的守护进程挤掉、重启即清空, 而且本包默认就不把 mihomo 的进程
- * 输出转发进 syslog。读写都走 /etc/mihomo/log.sh, 好处是不用为可配置的日志路径
+ * 输出转发进 syslog。读写都走 /usr/share/mihomo/log.sh, 好处是不用为可配置的日志路径
  * 在 ACL 里写 file 授权 (rpcd 会对 realpath 后的路径再查一次 ACL, /var -> /tmp
  * 的符号链接很容易踩空), exec 一个固定路径最稳。
  */
-var LOG_HELPER = '/etc/mihomo/log.sh';
+var LOG_HELPER = '/usr/share/mihomo/log.sh';
 var LOG_TAIL_LINES = 200;
 var LOG_MAX_MIN = 16;
 var LOG_MAX_MAX = 102400;

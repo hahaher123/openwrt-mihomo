@@ -24,7 +24,7 @@
  * 本包的落盘方式与 luci-app-oxidns 不同：这里没有自己的 rpcd 后端，用的是
  * LuCI 标准的 file.write（rpcd 的 luci 插件），它支持 append 参数 ⇒ 各块
  * 直接以 O_APPEND 追加进 /tmp 的暂存文件，拼装不需要任何服务端状态。等
- * 最后一块写完，页面再调 /etc/mihomo/config.sh install <暂存文件> <名字>
+ * 最后一块写完，页面再调 /usr/share/mihomo/config.sh install <暂存文件> <名字>
  * 去复校一次 mihomo -t 并按 rename 原子装进工作目录。
  */
 

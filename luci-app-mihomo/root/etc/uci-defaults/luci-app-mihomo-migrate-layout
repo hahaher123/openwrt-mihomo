@@ -1,0 +1,36 @@
+#!/bin/bash
+# 布局迁移 (luci-app-mihomo 1.0.8): 辅助脚本从 /etc/mihomo 迁到 /usr/share/mihomo。
+#
+# /etc/mihomo 之后只放需要修改/运行产生的数据 (config.yaml、tproxy.sh、clash.nft、
+# sources、geo 文件、cache.db); 纯执行的辅助脚本归位 /usr/share/mihomo:
+#   config.sh log.sh autoupdate.sh autorestart.sh ui.sh
+#
+# 旧版本升级上来时, 旧路径下的脚本文件由 apk 保留在原处 (apk 不删除不再释放的
+# 文件), 这里删掉它们, 并把本包托管的 crontab 块用新路径重写 (apply 幂等:
+# 读 uci -> strip 旧托管块 -> 按新路径写回; 未启用时等价于 remove)。
+# tproxy.sh / clash.nft 留在 /etc/mihomo, 页面 (透明代理页) 直接编辑它们。
+
+[ -n "$IPKG_INSTROOT" ] && exit 0
+
+NEW=/usr/share/mihomo
+OLD=/etc/mihomo
+
+removed=0
+for f in config.sh log.sh autoupdate.sh autorestart.sh ui.sh; do
+	if [ -f "$OLD/$f" ] && [ -f "$NEW/$f" ]; then
+		rm -f "$OLD/$f"
+		removed=1
+	fi
+done
+
+[ "$removed" = 1 ] || exit 0
+
+[ -x /bin/bash ] || exit 0
+
+"$NEW/autoupdate.sh" apply >/dev/null 2>&1
+"$NEW/autorestart.sh" apply >/dev/null 2>&1
+
+# ACL 里的 exec 路径变了: rpcd 的 reload 不会重读 acl.d, 必须 restart。
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart >/dev/null 2>&1
+
+exit 0

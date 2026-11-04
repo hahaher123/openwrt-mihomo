@@ -11,21 +11,21 @@
 //
 // - 列出 workdir 下的 *.yaml/*.yml, 可选中其中一个作为当前运行配置
 //   (写入 uci mihomo.main.conffile, 与 /etc/init.d/mihomo 读的是同一项)
-// - 删除选中的配置文件: 页面确认后由 /etc/mihomo/config.sh remove 完成,
+// - 删除选中的配置文件: 页面确认后由 /usr/share/mihomo/config.sh remove 完成,
 //   文件与其记录的订阅链接一并移除; 当前生效的配置服务端一律拒删
 // - 从远程 URL 导入 clash/mihomo 订阅, 先校验再落盘
-//   (由 /etc/mihomo/config.sh import 完成, 下载到 /tmp 校验通过后才安装)
+//   (由 /usr/share/mihomo/config.sh import 完成, 下载到 /tmp 校验通过后才安装)
 // - 上传本机的 .yaml/.yml 配置文件: 内容在浏览器里读出后与编辑保存走同一条
 //   分块上传链路, 由 config.sh install 校验并原子装入 workdir
 // - 仅更新服务器和代理组: 按订阅链接重新拉取, 只替换选中配置里的
 //   proxies / proxy-groups 两段, 其余设置与手动修改都保持不动
-//   (由 /etc/mihomo/config.sh update 完成)
+//   (由 /usr/share/mihomo/config.sh update 完成)
 // - 直接编辑选中的配置文件: 校验 / 保存 / 保存并重启
 //   保存与保存并重启都会先校验, 校验不通过不写文件
 //   内容不是一次性发上来的, 而是由 upload.js 切成小块分多次 RPC 追进 /tmp 的
 //   暂存文件 (一次大请求体会把 nginx 的 ubus 模块打崩), 校验通过后交给
 //   config.sh install 再校一遍并按 rename 原子装进 workdir
-// - 定时更新: 把「仅更新」写成一条 cron 计划任务 (由 /etc/mihomo/autoupdate.sh
+// - 定时更新: 把「仅更新」写成一条 cron 计划任务 (由 /usr/share/mihomo/autoupdate.sh
 //   的 set/apply 写 /etc/crontabs/root, 只动它自己那块带标记的内容), 设置存在
 //   uci mihomo.autoupdate (enabled/target/schedule/url); 本页面只读 uci,
 //   写入交给脚本 (避开 ubus 提交带来的服务 reload, 详见 autoupdate.sh)
@@ -39,9 +39,9 @@
 //
 
 var MIHOMO_BIN = '/usr/bin/mihomo';
-var HELPER = '/etc/mihomo/config.sh';
-var AUTOUPDATE = '/etc/mihomo/autoupdate.sh';
-var AUTORESTART = '/etc/mihomo/autorestart.sh';
+var HELPER = '/usr/share/mihomo/config.sh';
+var AUTOUPDATE = '/usr/share/mihomo/autoupdate.sh';
+var AUTORESTART = '/usr/share/mihomo/autorestart.sh';
 var CHECK_FILE = '/tmp/mihomo-config-check.yaml';
 
 // 编辑区里的整份内容先一小块一小块追加到 STAGE_PREFIX 开头的暂存文件, 再由

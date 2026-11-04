@@ -20,7 +20,7 @@
 # 只管理带标记的块, 用户自己写的计划任务不受影响:
 #
 #   # mihomo-autoupdate begin -- managed by luci-app-mihomo, do not edit
-#   <schedule> PATH=... /etc/mihomo/config.sh update '<target>' ['<url>'] 2>&1 | logger -t mihomo-autoupdate
+#   <schedule> PATH=... /usr/share/mihomo/config.sh update '<target>' ['<url>'] 2>&1 | logger -t mihomo-autoupdate
 #   # mihomo-autoupdate end
 #
 # 之所以用 cron 而不是常驻循环: crond 由 busybox 提供 (package/utils/busybox
@@ -37,7 +37,7 @@
 [ -s /lib/functions.sh ] && . /lib/functions.sh
 
 CRONTAB="/etc/crontabs/root"
-HELPER="/etc/mihomo/config.sh"
+HELPER="/usr/share/mihomo/config.sh"
 BEGIN="# mihomo-autoupdate begin -- managed by luci-app-mihomo, do not edit"
 END="# mihomo-autoupdate end"
 CRON_PATH="/usr/bin:/bin:/usr/sbin:/sbin"

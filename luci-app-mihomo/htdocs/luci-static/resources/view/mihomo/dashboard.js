@@ -7,7 +7,7 @@
 //
 // Mihomo 后台管理 (external-ui 面板)
 //
-// 面板文件不在本包里, 由 /etc/mihomo/ui.sh 在运行时下载安装:
+// 面板文件不在本包里, 由 /usr/share/mihomo/ui.sh 在运行时下载安装:
 //   - 上游 mihomo 自己也会下载 (配置里 external-ui 非空且目标目录为空时,
 //     component/updater/update_ui.go 的 AutoDownloadUI), 但它只用
 //     external-ui-url, 失败只在日志里写一行, 而且目录非空之后就再也不更新
@@ -23,7 +23,7 @@
 // uiPath 在启动时就已经注册好了。
 //
 
-var HELPER = '/etc/mihomo/ui.sh';
+var HELPER = '/usr/share/mihomo/ui.sh';
 var JOB_LOG = '/tmp/mihomo-ui.log';
 var URL_KEY = 'mihomo.ui.url';
 
