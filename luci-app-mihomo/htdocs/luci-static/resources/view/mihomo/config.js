@@ -5,6 +5,7 @@
 'require ui';
 'require rpc';
 'require view.mihomo.upload as chunkedUpload';
+'require view.mihomo.cmeditor as cmeditor';
 
 //
 // 配置文件管理页
@@ -524,9 +525,9 @@ return view.extend({
 		this.syncSourceField(true);
 
 		return fs.read(this.pathOf(name)).then(function(content) {
-			self.ta.value = content || '';
+			cmeditor.setValue(self.ta, content || '');
 		}, function(e) {
-			self.ta.value = '';
+			cmeditor.setValue(self.ta, '');
 			self.setResult('err', _('读取 %s 失败').format(self.pathOf(name)), String(e.message || e));
 		});
 	},
@@ -610,7 +611,7 @@ return view.extend({
 		// 更新只基于磁盘上的文件: 编辑区里未保存的修改不会被纳入, 更新成功后编辑区
 		// 又会被刷新覆盖, 所以先拦下来让用户决定。
 		return fs.read(path).then(function(disk) {
-			if (String(disk == null ? '' : disk) !== String(self.ta.value || '')) {
+			if (String(disk == null ? '' : disk) !== String(cmeditor.getValue(self.ta) || '')) {
 				self.setResult('warn', _('请先保存或放弃编辑区的修改'),
 					_('编辑区内容与磁盘上的 %s 不一致。').format(path) + '\n' +
 					_('「仅更新」只基于磁盘上的文件内容, 未保存的修改不会被纳入, 更新成功后编辑区也会被刷新。'));
@@ -754,7 +755,7 @@ return view.extend({
 					// 删的就是正在编辑的那份: 清掉编辑区, 让 refreshList 重选
 					if (self.selected == name) {
 						self.selected = null;
-						self.ta.value = '';
+						cmeditor.setValue(self.ta, '');
 					}
 
 					self.setResult('ok', _('已删除配置文件'), out);
@@ -854,7 +855,7 @@ return view.extend({
 
 		this.setResult('info', _('正在校验…'), '', true);
 
-		return this.validateContent(this.ta.value, c.workdir, this.progressReporter(_('正在校验…')))
+		return this.validateContent(cmeditor.getValue(this.ta), c.workdir, this.progressReporter(_('正在校验…')))
 			.then(function(res) {
 				var ok = (res && res.code == 0);
 
@@ -887,7 +888,7 @@ return view.extend({
 
 		this.setResult('info', _('正在保存…'), '', true);
 
-		return this.stageText(this.ta.value, name, this.progressReporter(_('正在保存…'))).then(function(up) {
+		return this.stageText(cmeditor.getValue(this.ta), name, this.progressReporter(_('正在保存…'))).then(function(up) {
 			if (!up.ok) {
 				self.setResult('err', _('保存失败'),
 					_('内容分块上传失败: %s').format(up.message));
@@ -1516,6 +1517,12 @@ return view.extend({
 
 		if (data.error)
 			this.setResult('err', _('读取目录 %s 失败').format(c.workdir), data.error, true);
+
+		// 编辑区换成 CodeMirror: 固定视口 + 内部滚动, 编辑长配置时页面不再跟着
+		// 光标上下滑动。资源加载失败时 attach 直接返回 null, 保持原生 textarea。
+		cmeditor.load().then(function() {
+			cmeditor.defer(self.ta, { mode: 'text/x-yaml' });
+		});
 
 		return root;
 	},

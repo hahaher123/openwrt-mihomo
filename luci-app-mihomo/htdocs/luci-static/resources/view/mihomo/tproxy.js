@@ -4,6 +4,7 @@
 'require fs';
 'require uci';
 'require ui';
+'require view.mihomo.cmeditor as cmeditor';
 
 var SCRIPT_PATH = '/etc/mihomo/tproxy.sh';
 var NFT_PATH = '/etc/mihomo/clash.nft';
@@ -31,7 +32,7 @@ return view.extend({
 	},
 
 	handleSaveFile: function(path, textarea, ev) {
-		return fs.write(path, textarea.value).then(function() {
+		return fs.write(path, cmeditor.getValue(textarea)).then(function() {
 			ui.addNotification(null, E('p', _('%s 已保存, 重启 mihomo 服务后生效').format(path)), 'info');
 		}).catch(function(e) {
 			ui.addNotification(null, E('p', _('保存 %s 失败: %s').format(path, String(e.message || e))), 'error');
@@ -100,6 +101,8 @@ return view.extend({
 			return Promise.resolve(self.updateToggleUI());
 		}, 5);
 
+		// 原生 textarea 只是兜底: 下面的 cmeditor.defer 会把它换成 CodeMirror,
+		// 编辑时只有编辑器内部滚动, 页面不再跟着光标上下滑动。
 		var editor = function(rows) {
 			return E('textarea', {
 				'rows': rows,
@@ -123,6 +126,11 @@ return view.extend({
 		var outputPre = E('pre', {
 			'style': 'max-height:360px; overflow:auto; padding:10px; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:8px; font-size:0.9em;'
 		}, [ _('点击「检查规则状态」查看当前 ip rule 与 nft 规则') ]);
+
+		cmeditor.load().then(function() {
+			cmeditor.defer(scriptTa, { mode: 'text/x-sh' });
+			cmeditor.defer(nftTa, { mode: 'text/x-sh' });
+		});
 
 		return E([
 			E('h2', [ _('透明代理 (TPROXY)') ]),
