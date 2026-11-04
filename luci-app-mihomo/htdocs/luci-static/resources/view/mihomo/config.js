@@ -784,23 +784,19 @@ return view.extend({
 			return Promise.resolve();
 		}
 
-		uci.set('mihomo', 'main', 'conffile', path);
+		var c = this.cfg();
 
-		return uci.save().then(function() {
-			return uci.apply();
-		}).then(function() {
-			// 顶部「现为 %s」与列表里的当前配置标记同步更新
-			var c = self.cfg();
-
+		// 收尾: 刷新顶部「现为 %s」与列表标记, 然后按需重启服务。
+		var finish = function() {
 			if (self.conffileInfo)
-				self.conffileInfo.textContent = _('当前生效配置由 uci mihomo.main.conffile 指定 (与 /etc/init.d/mihomo 同源), 现为 %s。').format(c.conffile);
+				self.conffileInfo.textContent = _('当前生效配置由 uci mihomo.main.conffile 指定 (与 /etc/init.d/mihomo 同源), 现为 %s。').format(path);
 
 			if (!restart) {
 				self.setResult('ok', _('已设为当前配置'), path + '\n' + _('重启 mihomo 服务后生效。'));
 				return self.refreshList();
 			}
 
-			self.setResult('info', _('已切换配置, 正在重启服务…'), path, true);
+			self.setResult('info', _('正在重启服务…'), path, true);
 
 			return self.restartService().then(function(res) {
 				var ok = (res && res.code == 0);
@@ -812,7 +808,26 @@ return view.extend({
 
 				return self.refreshList();
 			});
-		}, function(e) {
+		};
+
+		// 目标已是当前配置时绝不能再走 uci set/save/apply: libuci 对相同值
+		// 不产生 delta (list.c uci_set 相同则提前 return 0), rpcd 的 uci apply
+		// 找不到非空 delta 就以 NO_DATA 拒绝, save() 之后 apply() 必报错。
+		// 此时没有东西可提交, 只做 (可选的) 重启。
+		if (uci.get('mihomo', 'main', 'conffile') == path) {
+			if (!restart) {
+				self.setResult('ok', _('已是当前配置'), path + '\n' + _('没有需要切换的变更。'));
+				return Promise.resolve();
+			}
+
+			return finish();
+		}
+
+		uci.set('mihomo', 'main', 'conffile', path);
+
+		return uci.save().then(function() {
+			return uci.apply();
+		}).then(finish, function(e) {
 			self.setResult('err', _('切换配置失败'), String(e.message || e));
 		});
 	},
