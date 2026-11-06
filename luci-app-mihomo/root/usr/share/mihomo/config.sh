@@ -96,6 +96,14 @@ Usage: $0 import <url> [name] [force]
           url     subscription URL; when omitted the URL recorded for that
                   profile (see <workdir>/sources) is used
 
+  custom-save stage
+                  install a staged file (/tmp/mihomo-config-upload.*) as
+                  <workdir>/custom-groups.yaml. That file holds the user's
+                  own proxy groups; on every "update" they are merged into
+                  the profile and their names are injected into the
+                  subscription's select groups. Profiles listed in the uci
+                  list mihomo.main.custom_groups_off are skipped.
+
   remove  name    profile to delete from the work directory. The currently
                   selected config (uci mihomo.main.conffile) is refused; its
                   recorded subscription URL is dropped as well. When the
@@ -125,11 +133,14 @@ die() {
 load_config() {
 	WORKDIR="/etc/mihomo"
 	CONFFILE="/etc/mihomo/config.yaml"
+	CUSTOM_OFF=""
 
 	if [ -f /etc/config/mihomo ]; then
 		config_load mihomo
 		config_get WORKDIR "main" "workdir" "/etc/mihomo"
 		config_get CONFFILE "main" "conffile" "/etc/mihomo/config.yaml"
+		# 不做自定义组合并的 profile 列表 (LuCI 配置页勾选, 空格分隔)
+		config_get CUSTOM_OFF "main" "custom_groups_off"
 	fi
 
 	SOURCES="$WORKDIR/sources"
@@ -570,6 +581,192 @@ extract_block() {
 	sed -n "${from},${to}p" "$file"
 }
 
+# ---------------------------------------------------------------------------
+# 自定义代理组
+#
+# 统一入口: $WORKDIR/custom-groups.yaml。用户把自定义组(任意类型)写在里面,
+# 对所有 profile 的订阅更新生效, 不随 update 丢失, 换订阅也不用重写。
+# 文件内容就是一段 proxy-groups 块:
+#   proxy-groups:
+#     - { name: 自动测速, type: url-test, proxies: [香港, 东京, 新加坡, 美国],
+#         url: 'http://www.gstatic.com/generate_204', interval: 1800, tolerance: 50 }
+#
+# update 时的合并规则(merge_local_groups):
+#   1. 组源 = custom-groups.yaml (权威) + 旧 profile 里已手写的组(向后兼容,
+#      同名时 custom-groups.yaml 优先; 用户把组挪进统一文件后旧写法自然失效);
+#   2. 按组名判重, 远程已有的组以远程为准;
+#   3. 本地独有的组追加到 proxy-groups 段末尾;
+#   4. 组名自动补进远程各 select 组的 proxies 列表(流式 [a, b] 与块式逐行均
+#      支持), 保留「在手动选择组里挑自定义组」的入口。
+# 组切分规则: 列表项以缩进 + "- " 开头, 同级项缩进相同; 更深缩进的 "- x"
+# (块式 proxies 子项)、续行、空行、注释都归属当前组, 避免把子项误切成组。
+# 本地组引用的子组/节点若在远程已改名, 合并结果过不了 mihomo -t, 更新会
+# 中止并提示 — 硬失败优于静默丢组。
+# ---------------------------------------------------------------------------
+
+merge_local_groups() {
+	local localfile="$1" remotefile="$2" outfile="$3" groups="$4" keptf="$5"
+	local custom="$WORKDIR/custom-groups.yaml"
+	: > "$groups"
+	[ -s "$custom" ] && cat "$custom" >> "$groups"
+	if block_exists "$localfile" proxy-groups; then
+		extract_block "$localfile" proxy-groups >> "$groups"
+	fi
+	[ -s "$groups" ] || { cp "$remotefile" "$outfile"; echo 0 > "$keptf"; return 0; }
+	awk -v localgroups="$groups" -v keptf="$keptf" -v topre="$TOPKEY_RE" '
+		function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+		function value1(line, key,   t) {
+			t = line
+			if (t !~ key "[[:space:]]*:") return ""
+			sub("^.*" key "[[:space:]]*:[[:space:]]*", "", t)
+			sub(/[,}].*$/, "", t)
+			gsub(/[\047\042]/, "", t)
+			return trim(t)
+		}
+		function field(block, key,   L, n, i, v) {
+			n = split(block, L, "\n")
+			for (i = 1; i <= n; i++) { v = value1(L[i], key); if (v != "") return v }
+			return ""
+		}
+		function last_close(line,   pos, p) {
+			pos = 0
+			for (;;) {
+				p = index(substr(line, pos + 1), "]")
+				if (p == 0) break
+				pos += p
+			}
+			return pos
+		}
+		# 对一个远程 select 组块补入缺失的本地组名; 返回补好的块
+		function treat(block,   L, n, i, i2, k, typ, nm, res, newline, t, collecting, lastitem, ins_ind, p, plist, inj, covered, q1, q2, c3) {
+			typ = field(block, "type")
+			if (typ != "select" || cnt == 0) return block
+			nm = field(block, "name")
+			n = split(block, L, "\n")
+			# 流式内联: proxies: [ ... ] (可能还有后续键, 在最后一个 ] 前插入)
+			for (i = 1; i <= n; i++) {
+				if (L[i] ~ /proxies:[[:space:]]*\[/ && (p = last_close(L[i])) > 0) {
+					plist = substr(L[i], index(L[i], "[") + 1, p - index(L[i], "[") - 1)
+					inj = ""
+					for (k = 1; k <= cnt; k++) {
+						if (found[k]) continue
+						q1 = "\047" names[k] "\047"; q2 = "\042" names[k] "\042"; c3 = "," names[k] ","
+						covered = index(L[i], q1) != 0 || index(L[i], q2) != 0 || index(plist, c3) != 0 || index("," plist ",", c3) != 0
+						if (!covered) inj = inj (inj == "" ? "" : ", ") "\047" names[k] "\047"
+					}
+					if (inj == "") return block
+					newline = substr(L[i], 1, p - 1) ", " inj "]" substr(L[i], p + 1)
+					return join_ins(L, n, i, newline)
+				}
+			}
+			# 块式: proxies: 逐行列表, 在最后一个子项后按同缩进追加
+			collecting = 0; lastitem = 0; ins_ind = "  "
+			for (i = 1; i <= n; i++) {
+				if (collecting) {
+					if (L[i] ~ /^[[:space:]]+-[[:space:]]/) {
+						lastitem = i
+						match(L[i], /^[[:space:]]*/)
+						ins_ind = substr(L[i], 1, RLENGTH)
+						continue
+					}
+					if (L[i] ~ /^[[:space:]]*$/ || L[i] ~ /^[[:space:]]*#/) continue
+					break
+				}
+				if (L[i] ~ /^[[:space:]]*proxies:[[:space:]]*$/) collecting = 1
+			}
+			if (collecting && lastitem > 0) {
+				inj = ""
+				for (k = 1; k <= cnt; k++) {
+					if (found[k]) continue
+					covered = 0
+					for (i2 = 1; i2 <= n; i2++) {
+						if (index(L[i2], "\047" names[k] "\047") != 0 || index(L[i2], "\042" names[k] "\042") != 0) { covered = 1; break }
+						if (L[i2] ~ /^[[:space:]]+-[[:space:]]/) {
+							t = substr(L[i2], RLENGTH + 1)
+							gsub(/[\047\042]/, "", t)
+							sub(/[[:space:]]+$/, "", t)
+							if (t == names[k]) { covered = 1; break }
+						}
+					}
+					if (!covered) inj = inj (inj == "" ? "" : " ") ins_ind "- \047" names[k] "\047\n"
+				}
+				if (inj == "") return block
+				res = ""
+				for (i = 1; i <= n; i++) {
+					res = res L[i] "\n"
+					if (i == lastitem) { res = res inj; i = n + 1; break }
+				}
+				return res
+			}
+			return block
+		}
+		function join_ins(L, n, at, newline,   i, res) {
+			res = ""
+			for (i = 1; i <= n; i++) {
+				res = res (i == at ? newline : L[i]) (i < n ? "\n" : "")
+			}
+			return res
+		}
+		function flush_group() {
+			if (cur == "") return
+			nm = field(cur, "name")
+			if (nm != "") for (k = 1; k <= cnt; k++) if (nm == names[k]) found[k] = 1
+			print treat(cur)
+			cur = ""
+		}
+		function dump_kept(   k) {
+			if (kept_done) return
+			kept_done = 1
+			for (k = 1; k <= cnt; k++) if (!found[k]) { print blocks[k]; kept_cnt++ }
+			printf "%d\n", kept_cnt > keptf
+		}
+		# 收集团块; 同名先到先得(custom-groups.yaml 先载, 权威优先)
+		function ldpush(   nm) {
+			if (ld == "") return
+			nm = field(ld, "name")
+			if (nm == "") nm = "\001" (++anon)
+			if (!seen[nm]) { seen[nm] = 1; cnt++; blocks[cnt] = ld; names[cnt] = nm; found[cnt] = 0 }
+			ld = ""
+		}
+		BEGIN {
+			cnt = 0; kept_cnt = 0; kept_done = 0; anon = 0
+			while ((getline line < localgroups) > 0) {
+				if (line ~ /^[[:space:]]*proxy-groups:[[:space:]]*$/) continue
+				# 顶层键用 TOPKEY_RE 判定: 顶格的 "- name: ..." 是列表条目, 不是键
+				if (line ~ topre) { ldpush(); continue }
+				if (line ~ /^[[:space:]]*$/ || line ~ /^[[:space:]]*#/) {
+					if (ld != "") ld = ld "\n" line
+					continue
+				}
+				match(line, /^[[:space:]]*/)
+				l2 = RLENGTH
+				if (ld == "") { ld = line; ind2 = l2; continue }
+				if (l2 > ind2) { ld = ld "\n" line; continue }
+				ldpush(); ld = line; ind2 = l2
+			}
+			ldpush()
+			close(localgroups)
+		}
+		/^proxy-groups:[[:space:]]*$/ { flush_group(); in_groups = 1; print; next }
+		in_groups && $0 ~ topre { flush_group(); dump_kept(); in_groups = 0; print; next }
+		in_groups {
+			if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) {
+				if (cur != "") cur = cur "\n" $0; else print
+				next
+			}
+			match($0, /^[[:space:]]*/)
+			l = RLENGTH
+			if (cur == "") { cur = $0; ind = l; next }
+			if (l > ind) { cur = cur "\n" $0; next }
+			flush_group(); cur = $0; ind = l
+			next
+		}
+		{ print }
+		END { flush_group(); dump_kept() }
+	' "$remotefile" > "$outfile"
+	[ -s "$keptf" ] || echo 0 > "$keptf"
+}
+
 # 判断一个块文件里是否真的有条目 (空列表 proxies: [] 视为空)
 block_has_entries() {
 	grep -qE '^[[:space:]]*-[[:space:]]*[^[:space:]]' "$1" && return 0
@@ -828,7 +1025,7 @@ do_remove() {
 do_update() {
 	local name="$1" url="$2" from_record=0
 	local target before after cur stage
-	local dl norm flog newp newg m1 m2 chk rc hints reason
+	local dl norm flog newp newg localg mergedg keptf m1 m2 chk rc hints reason
 	local have_p have_g n1 n2 note_p note_g
 
 	[ -n "$name" ] || die "缺少配置文件名"
@@ -859,12 +1056,15 @@ do_update() {
 	flog="/tmp/mihomo-update.$$.log"
 	newp="/tmp/mihomo-update.$$.proxies"
 	newg="/tmp/mihomo-update.$$.groups"
+	localg="/tmp/mihomo-update.$$.local-groups"
+	mergedg="/tmp/mihomo-update.$$.merged-groups"
+	keptf="/tmp/mihomo-update.$$.kept"
 	m1="/tmp/mihomo-update.$$.1"
 	m2="/tmp/mihomo-update.$$.2"
 	chk="/tmp/mihomo-update.$$.check"
 	n1="/tmp/mihomo-update.$$.cmp.new"
 	n2="/tmp/mihomo-update.$$.cmp.old"
-	TMPFILES="$TMPFILES $dl $flog $newp $newg $m1 $m2 $chk $n1 $n2"
+	TMPFILES="$TMPFILES $dl $flog $newp $newg $localg $mergedg $keptf $m1 $m2 $chk $n1 $n2"
 
 	before=$(wc -c < "$target" | tr -d ' ')
 
@@ -947,11 +1147,22 @@ do_update() {
 	fi
 
 	if [ "$have_g" = 1 ]; then
-		if block_exists "$cur" proxy-groups; then
-			note_g="已用远程内容替换"
-		else
-			note_g="本地原本没有该段, 已追加到文件末尾"
-		fi
+		# per-profile 开关: uci mihomo.main.custom_groups_off 列表里的 profile
+		# 不做合并, 完全按订阅原始内容更新; 不在列表则默认启用。
+		case " $CUSTOM_OFF " in
+			*" $name "*)
+				note_g="本 profile 已在 LuCI 勾选关闭自定义组合并, 按订阅原始内容更新"
+				;;
+			*)
+				merge_local_groups "$target" "$newg" "$mergedg" "$localg" "$keptf" || die "更新 $name 失败: 合并本地自定义组时出错"
+				newg="$mergedg"
+				if block_exists "$cur" proxy-groups; then
+					note_g="已更新订阅组, 并保留 $(cat "$keptf" 2>/dev/null) 个本地自定义组"
+				else
+					note_g="本地原本没有该段, 已追加到文件末尾"
+				fi
+				;;
+		esac
 		replace_block "$cur" "$newg" proxy-groups > "$m2" || die "更新 $name 失败: 处理 proxy-groups 段时出错"
 		cur="$m2"
 	else
@@ -1051,6 +1262,33 @@ do_update() {
 	fi
 }
 
+# ---------------------------------------------------------------------------
+# 命令: custom-save  (把 LuCI「自定义代理组」编辑区提交的暂存文件落位)
+# ---------------------------------------------------------------------------
+
+do_custom_save() {
+	local stage="$1"
+
+	load_config
+
+	case "$stage" in
+		/tmp/mihomo-config-upload.*) ;;
+		*)
+			die "custom-save 只接受 /tmp/mihomo-config-upload.* 暂存文件"
+			;;
+	esac
+
+	[ -f "$stage" ] || die "暂存文件不存在: $stage"
+
+	grep -qE '^[[:space:]]*proxy-groups:' "$stage" \
+		|| die "内容缺少 proxy-groups: 键行: custom-groups.yaml 必须以 proxy-groups: 块为主体 (允许注释)"
+
+	mv -f "$stage" "$WORKDIR/custom-groups.yaml" || die "写入 $WORKDIR/custom-groups.yaml 失败"
+	chmod 600 "$WORKDIR/custom-groups.yaml" 2>/dev/null
+	echo "已写入 $WORKDIR/custom-groups.yaml ($(wc -c < "$WORKDIR/custom-groups.yaml" | tr -d ' ') 字节)"
+	echo "RESULT: saved"
+}
+
 cmd="$1"
 [ $# -gt 0 ] && shift
 
@@ -1066,6 +1304,9 @@ case "$cmd" in
 	update)
 		load_config
 		do_update "$1" "$2"
+		;;
+	custom-save)
+		do_custom_save "$1"
 		;;
 	remove)
 		load_config
