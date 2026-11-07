@@ -651,6 +651,9 @@ merge_local_groups() {
 					plist = substr(L[i], index(L[i], "[") + 1, p - index(L[i], "[") - 1)
 					inj = ""
 					for (k = 1; k <= cnt; k++) {
+						# Never add a select group to its own proxy list; in legacy profile
+						# mode the local source also contains the remote select group.
+						if (names[k] == nm) continue
 						q1 = "\047" names[k] "\047"; q2 = "\042" names[k] "\042"; c3 = "," names[k] ","
 						covered = index(L[i], q1) != 0 || index(L[i], q2) != 0 || index(plist, c3) != 0 || index("," plist ",", c3) != 0
 						if (!covered) inj = inj (inj == "" ? "" : ", ") "\047" names[k] "\047"
@@ -678,6 +681,7 @@ merge_local_groups() {
 			if (collecting && lastitem > 0) {
 				inj = ""
 				for (k = 1; k <= cnt; k++) {
+					if (names[k] == nm) continue
 					covered = 0
 					for (i2 = 1; i2 <= n; i2++) {
 						if (index(L[i2], "\047" names[k] "\047") != 0 || index(L[i2], "\042" names[k] "\042") != 0) { covered = 1; break }
