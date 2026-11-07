@@ -539,7 +539,9 @@ return view.extend({
 	// ---------------- 自定义代理组 ----------------
 
 	customPath: function() {
-		return this.cfg().workdir + '/custom-groups.yaml';
+		// 放子目录: 配置文件列表只收 workdir 顶层的 *.yaml, 子目录不会
+		// 被当成 profile, 避免扰乱正常配置文件列表。
+		return this.cfg().workdir + '/custom.d/custom-groups.yaml';
 	},
 
 	CUSTOM_TEMPLATE:
@@ -1579,7 +1581,7 @@ return view.extend({
 
 			E('h3', {}, [ _('自定义代理组 (订阅更新时保留)') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('写在下面的自定义组 (任意类型) 保存在 %s, 对所有配置文件的「仅更新」生效, 不随订阅更新丢失, 换订阅也不用重写。更新时按组名判重: 订阅已有的组以订阅为准, 自定义组追加到订阅组后, 组名自动补进订阅各 select 组供手动选择。').format(c.workdir + '/custom-groups.yaml'),
+				_('写在下面的自定义组 (任意类型) 保存在 %s, 对所有配置文件的「仅更新」生效, 不随订阅更新丢失, 换订阅也不用重写。更新时按组名判重: 订阅已有的组以订阅为准, 自定义组追加到订阅组后, 组名自动补进订阅各 select 组供手动选择。').format(c.workdir + '/custom.d/custom-groups.yaml'),
 				E('br'),
 				_('文件必须是 proxy-groups: 块, 例如:')
 			]),

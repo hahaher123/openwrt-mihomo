@@ -98,11 +98,12 @@ Usage: $0 import <url> [name] [force]
 
   custom-save stage
                   install a staged file (/tmp/mihomo-config-upload.*) as
-                  <workdir>/custom-groups.yaml. That file holds the user's
-                  own proxy groups; on every "update" they are merged into
-                  the profile and their names are injected into the
-                  subscription's select groups. Profiles listed in the uci
-                  list mihomo.main.custom_groups_off are skipped.
+                  <workdir>/custom.d/custom-groups.yaml. That file holds
+                  the user's own proxy groups; on every "update" they are
+                  merged into the profile and their names are injected
+                  into the subscription's select groups. Profiles listed
+                  in the uci list mihomo.main.custom_groups_off are
+                  skipped.
 
   remove  name    profile to delete from the work directory. The currently
                   selected config (uci mihomo.main.conffile) is refused; its
@@ -584,9 +585,10 @@ extract_block() {
 # ---------------------------------------------------------------------------
 # 自定义代理组
 #
-# 统一入口: $WORKDIR/custom-groups.yaml。用户把自定义组(任意类型)写在里面,
-# 对所有 profile 的订阅更新生效, 不随 update 丢失, 换订阅也不用重写。
-# 文件内容就是一段 proxy-groups 块:
+# 统一入口: $WORKDIR/custom.d/custom-groups.yaml。放在子目录是为了不进
+# LuCI 配置文件列表(列表只收 workdir 顶层的 *.yaml)。用户把自定义组(任意
+# 类型)写在里面, 对所有 profile 的订阅更新生效, 不随 update 丢失, 换订阅
+# 也不用重写。文件内容就是一段 proxy-groups 块:
 #   proxy-groups:
 #     - { name: 自动测速, type: url-test, proxies: [香港, 东京, 新加坡, 美国],
 #         url: 'http://www.gstatic.com/generate_204', interval: 1800, tolerance: 50 }
@@ -606,7 +608,7 @@ extract_block() {
 
 merge_local_groups() {
 	local localfile="$1" remotefile="$2" outfile="$3" groups="$4" keptf="$5"
-	local custom="$WORKDIR/custom-groups.yaml"
+	local custom="$WORKDIR/custom.d/custom-groups.yaml"
 	: > "$groups"
 	[ -s "$custom" ] && cat "$custom" >> "$groups"
 	if block_exists "$localfile" proxy-groups; then
@@ -1283,9 +1285,10 @@ do_custom_save() {
 	grep -qE '^[[:space:]]*proxy-groups:' "$stage" \
 		|| die "内容缺少 proxy-groups: 键行: custom-groups.yaml 必须以 proxy-groups: 块为主体 (允许注释)"
 
-	mv -f "$stage" "$WORKDIR/custom-groups.yaml" || die "写入 $WORKDIR/custom-groups.yaml 失败"
-	chmod 600 "$WORKDIR/custom-groups.yaml" 2>/dev/null
-	echo "已写入 $WORKDIR/custom-groups.yaml ($(wc -c < "$WORKDIR/custom-groups.yaml" | tr -d ' ') 字节)"
+	mkdir -p "$WORKDIR/custom.d" || die "创建 $WORKDIR/custom.d 失败"
+	mv -f "$stage" "$WORKDIR/custom.d/custom-groups.yaml" || die "写入 $WORKDIR/custom.d/custom-groups.yaml 失败"
+	chmod 600 "$WORKDIR/custom.d/custom-groups.yaml" 2>/dev/null
+	echo "已写入 $WORKDIR/custom.d/custom-groups.yaml ($(wc -c < "$WORKDIR/custom.d/custom-groups.yaml" | tr -d ' ') 字节)"
 	echo "RESULT: saved"
 }
 
