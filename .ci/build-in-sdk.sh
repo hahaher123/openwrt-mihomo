@@ -14,6 +14,8 @@
 #   FEED_DIR      feed 根目录（挂到 /feed）
 #   ARTIFACTS_DIR 产物目录（挂到 /artifacts）
 #   V / INDEX / BUILD_LOG / KEY_BUILD  透传给 entrypoint
+#   UPSTREAM_URL  可选。SDK tarball 的下载站点根（容器内 setup.sh 读它，优先级高于
+#                 镜像自带的 FILE_HOST）。默认 https://downloads.openwrt.org。
 #   GO_CACHE_DIR  可选。设置后把宿主机的 $GO_CACHE_DIR/build 与 /mod 分别挂到
 #                 容器的 /gocache 与 /gomodcache，并用 MAKEFLAGS 把
 #                 GO_BUILD_CACHE_DIR / GO_MOD_CACHE_DIR 指过去（Go 编译缓存跨
@@ -57,6 +59,15 @@ if [ -n "${GO_CACHE_DIR:-}" ]; then
 	GO_ENV=(--env "MAKEFLAGS=GO_BUILD_CACHE_DIR=/gocache GO_MOD_CACHE_DIR=/gomodcache")
 fi
 
+# SDK 下载源：镜像 ghcr.io/openwrt/sdk:<arch>-<ver> 里 RUN_SETUP=0（SDK 未预展开），
+# entrypoint 启动时会跑 /builder/setup.sh 现场下载 200+ MB 的 tar.zst。下载源由镜像
+# 内 FILE_HOST 决定，官方 CI 把它覆盖成了 mirror-03.infra.openwrt.org —— 这台实测会
+# 劣化到 13–23 KB/s，一次下载就要 3 小时以上（2026-11-07 run #55：x86_64 12,339 s、
+# aarch64 9,347 s，而正常基线是 110 s）。setup.sh 第 6 行留了优先级最高的覆盖点：
+#   FILE_HOST="${UPSTREAM_URL:-${FILE_HOST:-https://downloads.openwrt.org}}"
+# 因此下面用 UPSTREAM_URL 指回官方 CDN（实测 2.5 MB/s），不必改镜像。
+UPSTREAM_URL="${UPSTREAM_URL:-https://downloads.openwrt.org}"
+
 # FIXUP=1：make check 发现 HASH 非 64 位 sha256 时，调 fixup-makefile.pl 就地
 # 改正并视为通过（只改容器内的 /feed 副本，不回写仓库）。
 docker run --rm \
@@ -68,6 +79,7 @@ docker run --rm \
 	--env INDEX \
 	--env KEY_BUILD \
 	--env FIXUP=1 \
+	--env "UPSTREAM_URL=${UPSTREAM_URL}" \
 	-v "${FEED_DIR}:/feed" \
 	-v "${ARTIFACTS_DIR}:/artifacts" \
 	-v "${ENTRYPOINT}:/entrypoint.sh:ro" \
