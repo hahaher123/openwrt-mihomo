@@ -28,11 +28,13 @@
 //   config.sh install 再校一遍并按 rename 原子装进 workdir
 // - 定时更新: 把「仅更新」写成一条 cron 计划任务 (由 /usr/share/mihomo/autoupdate.sh
 //   的 set/apply 写 /etc/crontabs/root, 只动它自己那块带标记的内容), 设置存在
-//   uci mihomo.autoupdate (enabled/target/schedule/url); 本页面只读 uci,
+//   uci mihomo.autoupdate (enabled/target/schedule); 本页面只读 uci,
 //   写入交给脚本 (避开 ubus 提交带来的服务 reload, 详见 autoupdate.sh)
 //
 // 订阅链接记录在 <workdir>/sources ("<name> <url>" 每行一条), 由 config.sh
-// 在 import/update 时写入, 本页面只读取它来预填「仅更新」的链接输入框。
+// 在 import/update 时写入, 是链接的唯一事实源: 本页面读它预填「仅更新」的
+// 输入框, 并作为「定时更新」的链接显示; cron 命令本身不带链接, 由
+// config.sh update 运行时按目标文件名去查 —— 换目标就自动换链接。
 //
 // 校验统一用上游自带的 "mihomo -t", 参数与服务启动一致 (-f <配置> -d <workdir>)。
 // mihomo 按 -d 解析配置内的相对路径 (constant/path.go: Resolve 用 HomeDir),
@@ -256,6 +258,9 @@ return view.extend({
 
 		return this.loadSources().then(function() {
 			self.syncSourceField();
+			// sources 重新读盘后, 定时更新的「来源链接」提示也要跟着更新
+			// (导入订阅或「仅更新」成功后链接才会出现)。
+			self.refreshAutoSourceInfo();
 		});
 	},
 
@@ -1088,15 +1093,17 @@ return view.extend({
 
 	// ---------------- 定时更新 (uci mihomo.autoupdate + autoupdate.sh) ----------------
 
-	// uci 里的定时更新设置。autoupdate.sh 用 config_get 读同名的四项,
-	// 所以这里的键名必须与脚本一致 (enabled / target / schedule / url)。
+	// uci 里的定时更新设置。autoupdate.sh 用 config_get 读同名的三项,
+	// 所以这里的键名必须与脚本一致 (enabled / target / schedule)。
+	// 订阅链接刻意不在 uci 里: 链接只存在于 <workdir>/sources (导入订阅或手动
+	// 「仅更新」时记录), 定时任务按目标文件名去查。早先把链接快照进 uci 是
+	// 「换了目标配置、链接还是上一个」的根源, 现在整条链路只有一个来源。
 	// 只读不写: 写由 autoupdate.sh set 用命令行 uci 完成 (见该脚本的说明)。
 	autoSettings: function() {
 		return {
 			enabled:  uci.get_first('mihomo', 'autoupdate', 'enabled') == '1',
 			target:   uci.get_first('mihomo', 'autoupdate', 'target') || '',
-			schedule: uci.get_first('mihomo', 'autoupdate', 'schedule') || AUTO_DEFAULT_SCHEDULE,
-			url:      uci.get_first('mihomo', 'autoupdate', 'url') || ''
+			schedule: uci.get_first('mihomo', 'autoupdate', 'schedule') || AUTO_DEFAULT_SCHEDULE
 		};
 	},
 
@@ -1136,7 +1143,6 @@ return view.extend({
 
 		this.autoEnabled.checked = s.enabled;
 		this.autoTarget.value = s.target;
-		this.autoUrl.value = s.url;
 
 		for (var i = 0; i < AUTO_SCHEDULES.length; i++) {
 			if (AUTO_SCHEDULES[i][0] == s.schedule) {
@@ -1152,6 +1158,43 @@ return view.extend({
 		}
 
 		this.autoScheduleSync();
+		this.refreshAutoSourceInfo();
+	},
+
+	// 目标下拉框换成别的配置文件时, 立刻把「来源链接」这一行换成新目标的记录,
+	// 而不是沿用上一个目标留下的链接 (那正是脱钩的表现)。
+	handleAutoTarget: function(ev) {
+		this.refreshAutoSourceInfo();
+		return Promise.resolve();
+	},
+
+	// 展示定时任务真正会用的订阅链接: 取自 <workdir>/sources 里该文件的记录,
+	// 与 config.sh update 运行时查的是同一份数据。没有记录时明确告警 ——
+	// autoupdate.sh apply 会拒绝写入一条注定失败的计划任务。
+	refreshAutoSourceInfo: function() {
+		if (!this.autoSrcInfo)
+			return;
+
+		var name = String(this.autoTarget.value || '');
+		var url = name ? ((this.sources || {})[name] || '') : '';
+		var ok = 'color:#1b5e20; background:#e8f5e9; border-left:4px solid #2e7d32;';
+		var bad = 'color:#8a1c1c; background:#fdecea; border-left:4px solid #c62828;';
+		var none = 'color:#555; background:#f4f4f4; border-left:4px solid #9e9e9e;';
+
+		if (!name) {
+			this.autoSrcInfo.style.cssText = 'margin:10px 0; padding:8px 10px; border-radius:6px; font-size:0.92em;' + none;
+			this.autoSrcInfo.textContent = _('尚未选择目标配置。');
+		}
+		else if (url) {
+			this.autoSrcInfo.style.cssText = 'margin:10px 0; padding:8px 10px; border-radius:6px; font-size:0.92em; word-break:break-all;' + ok;
+			this.autoSrcInfo.textContent =
+				_('来源链接 (取自 %s, 换目标时自动跟随): %s').format(this.sourcePath(), url);
+		}
+		else {
+			this.autoSrcInfo.style.cssText = 'margin:10px 0; padding:8px 10px; border-radius:6px; font-size:0.92em;' + bad;
+			this.autoSrcInfo.textContent =
+				_('%s 没有记录订阅链接, 定时任务无法执行; 请在上方「仅更新」的输入框里填写链接并执行一次, 或改用订阅链接重新导入该配置。').format(name);
+		}
 	},
 
 	// 「更新频率」选到自定义时展开 cron 输入框, 否则把选中的表达式写进去
@@ -1192,11 +1235,18 @@ return view.extend({
 		var target = String(this.autoTarget.value || '');
 		var freq = String(this.autoFreq.value || '');
 		var schedule = (freq == 'custom') ? String(this.autoCron.value || '').trim() : freq;
-		var url = String(this.autoUrl.value || '').trim();
 
 		if (enabled) {
 			if (!target) {
 				this.setResult('warn', _('请选择要定时更新的配置文件'), '');
+				return Promise.resolve();
+			}
+
+			// 链接不在这里传: 由 autoupdate.sh 按目标去 <workdir>/sources 查。
+			// 页面上先拦一次, 免得到服务端才发现没记录。
+			if (!((this.sources || {})[target] || '')) {
+				this.setResult('warn', _('%s 没有记录订阅链接, 无法启用定时更新').format(target),
+					_('请在上方「仅更新」的输入框里填写链接并对该配置执行一次 (成功后链接会被记录), 或改用订阅链接重新导入。'));
 				return Promise.resolve();
 			}
 
@@ -1213,7 +1263,7 @@ return view.extend({
 		// 只改一个定时设置不该重启代理。
 		this.setResult('info', _('正在保存定时设置…'), '', true);
 
-		return fs.exec(AUTOUPDATE, [ 'set', enabled ? '1' : '0', target, schedule, url ])
+		return fs.exec(AUTOUPDATE, [ 'set', enabled ? '1' : '0', target, schedule ])
 			.then(function(res) {
 				var ok = (res && res.code == 0);
 				var out = joinOutput(res) || _('(无输出)');
@@ -1452,7 +1502,8 @@ return view.extend({
 		this.autoEnabled = E('input', { 'type': 'checkbox' }, []);
 
 		this.autoTarget = E('select', {
-			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff; font-family:monospace; min-width:180px;'
+			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff; font-family:monospace; min-width:180px;',
+			'change': ui.createHandlerFn(self, 'handleAutoTarget')
 		}, []);
 
 		this.autoFreq = E('select', {
@@ -1468,11 +1519,12 @@ return view.extend({
 			'style': 'display:none; width:200px; padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; font-family:monospace;'
 		}, []);
 
-		this.autoUrl = E('input', {
-			'type': 'text',
-			'placeholder': _('留空则使用该配置记录的订阅链接'),
-			'style': 'width:100%; padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; font-family:monospace;'
-		}, []);
+		// 来源链接只显示、不编辑: 唯一事实源是 <workdir>/sources (导入订阅或
+		// 手动「仅更新」时写入), 页面上再放一个输入框就会产生第二份真相,
+		// 换目标时忘记跟着改, 就会拿错链接去更新别的文件。
+		this.autoSrcInfo = E('div', {
+			'style': 'margin:10px 0; padding:8px 10px; border-radius:6px; font-size:0.92em;'
+		}, [ _('尚未选择目标配置。') ]);
 
 		this.autoStatusPre = E('pre', {
 			'style': 'margin:10px 0 0 0; padding:10px; max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-all; background:#f6f6f6; border:1px solid #e2e2e2; border-radius:6px; font-size:0.9em; color:#333;'
@@ -1608,6 +1660,8 @@ return view.extend({
 				E('br'),
 				_('内容与本地一致时什么都不做 (既不写盘也不重启); 内容有变化时更新配置并重启服务, 让新服务器立即生效。其余设置不会被改动; 每次结果与失败原因写入系统日志 (logread, 标签 mihomo-autoupdate)。'),
 				E('br'),
+				_('订阅链接不单独保存, 也不写进计划任务: 任务只记「更新哪个文件」, 运行时按文件名去 %s 里取该配置导入时记录的链接。所以换目标配置时链接自动跟着换, 不会拿上一个配置的链接去更新新目标。').format(c.workdir + '/sources'),
+				E('br'),
 				_('计划任务写在 /etc/crontabs/root 里由本页面管理的标记块中, 你自己添加的其它计划任务不受影响。')
 			]),
 			E('div', { 'style': 'display:flex; align-items:center; gap:18px; flex-wrap:wrap; margin:10px 0;' }, [
@@ -1621,7 +1675,7 @@ return view.extend({
 					_('更新频率'), this.autoFreq, this.autoCron
 				])
 			]),
-			E('div', { 'style': 'margin:10px 0 6px 0;' }, [ this.autoUrl ]),
+			E('div', { 'style': 'margin:10px 0 6px 0;' }, [ this.autoSrcInfo ]),
 			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap;' }, [
 				btn(_('保存定时设置'), 'handleAutoSave'),
 				btn(_('关闭定时更新'), 'handleAutoRemove', 'cbi-button'),

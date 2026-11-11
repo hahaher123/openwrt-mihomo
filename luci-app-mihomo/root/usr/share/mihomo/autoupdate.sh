@@ -6,10 +6,16 @@
 # 只负责把这条命令按 uci 里的设置写进 crontab, 并在关闭时把托管块移除。
 #
 #   autoupdate.sh apply    读取 uci mihomo.autoupdate, 写入 /etc/crontabs/root 并生效
-#   autoupdate.sh set <enabled> <target> <schedule> <url>
+#   autoupdate.sh set <enabled> <target> <schedule>
 #                          用给定值写 uci 再生效 (LuCI 页面用这条)
 #   autoupdate.sh remove   移除本脚本管理的计划任务
 #   autoupdate.sh status   打印当前状态 (供页面显示)
+#
+# ★ 订阅链接不落在 uci 里, 也不进 cron 命令行。计划任务只记「更新哪个文件」,
+#   链接由 config.sh update 在运行时按文件名去 <workdir>/sources 查。
+#   原因: 早先把链接快照进 uci 后, 换目标配置不会同步换链接 —— cron 会一直拿
+#   上一个配置的链接去更新新目标, 配置文件与其来源就此脱钩。sources 是导入
+#   订阅时记录的唯一事实源, 一处记录, 手动「仅更新」与定时任务共用。
 #
 # set 为什么不用 rpcd 的 uci.apply: 通过 ubus 提交 UCI 会走 /sbin/reload_config,
 # 它比对 /etc/config/* 的内容变化并发 config.change 事件, 使注册了
@@ -20,7 +26,7 @@
 # 只管理带标记的块, 用户自己写的计划任务不受影响:
 #
 #   # mihomo-autoupdate begin -- managed by luci-app-mihomo, do not edit
-#   <schedule> PATH=... /usr/share/mihomo/config.sh update '<target>' ['<url>'] 2>&1 | logger -t mihomo-autoupdate
+#   <schedule> PATH=... /usr/share/mihomo/config.sh update '<target>' 2>&1 | logger -t mihomo-autoupdate
 #   # mihomo-autoupdate end
 #
 # 之所以用 cron 而不是常驻循环: crond 由 busybox 提供 (package/utils/busybox
@@ -55,6 +61,18 @@ load_config() {
 
 	config_load mihomo
 	config_get WORKDIR "main" "workdir" "/etc/mihomo"
+}
+
+# 该配置记录的订阅链接 (导入订阅 / 手动「仅更新」成功时由 config.sh 写入
+# <workdir>/sources, 每行 "<文件名> <url>")。
+# 格式与 config.sh 的 source_get 完全一致 —— 这里是同一份事实源的另一个读者,
+# 任何一处改格式都必须同时改两处。
+source_get() {
+	local f="$WORKDIR/sources"
+
+	[ -f "$f" ] || return 0
+
+	awk -v n="$1" '$1 == n { sub(/^[^[:space:]]+[[:space:]]+/, ""); print; exit }' "$f" 2>/dev/null
 }
 
 # ---- 参数校验 (这些值最终会出现在 crontab 里由 shell 执行, 必须严格) ----
@@ -153,8 +171,8 @@ managed_line() {
 # ---- uci 读写 (命令行 uci, 不经过 ubus, 因此不会触发服务 reload) ----
 
 uci_save_settings() {
-	# $1=enabled $2=target $3=schedule $4=url
-	local enabled="$1" target="$2" schedule="$3" url="$4"
+	# $1=enabled $2=target $3=schedule
+	local enabled="$1" target="$2" schedule="$3"
 
 	command -v uci >/dev/null 2>&1 || die "系统里没有 uci 命令, 无法保存定时设置"
 
@@ -177,11 +195,10 @@ uci_save_settings() {
 		uci -q delete "mihomo.autoupdate.schedule" 2>/dev/null
 	fi
 
-	if [ -n "$url" ]; then
-		uci -q set "mihomo.autoupdate.url=$url"
-	else
-		uci -q delete "mihomo.autoupdate.url" 2>/dev/null
-	fi
+	# 旧版本把订阅链接快照在 mihomo.autoupdate.url 里, 那是「配置与来源脱钩」的
+	# 根源 (换目标不换链接)。现在链接只在 <workdir>/sources 里有一份, 这里顺手
+	# 把这个历史键删掉, 免得残留值继续误导人。
+	uci -q delete "mihomo.autoupdate.url" 2>/dev/null
 
 	uci -q commit mihomo || die "写入 /etc/config/mihomo 失败"
 }
@@ -189,7 +206,7 @@ uci_save_settings() {
 # ---- 命令 ----
 
 do_set() {
-	local enabled="$1" target="$2" schedule="$3" url="$4"
+	local enabled="$1" target="$2" schedule="$3" legacyurl="$4" url
 
 	case "$enabled" in
 		1) enabled=1 ;;
@@ -204,13 +221,19 @@ do_set() {
 		# 目标文件必须先存在, 否则写进 uci 的会是一条永远失败的计划任务
 		[ -f "$WORKDIR/$target" ] \
 			|| die "目标配置不存在: $WORKDIR/$target (请先导入或创建该配置文件)"
+		# 链接必须有记录: 定时任务是无人值守的, 到点才发现没链接就白跑一轮。
+		url="$(source_get "$target")"
+		[ -n "$url" ] || die "配置 $target 没有记录订阅链接, 无法定时更新 (请先用订阅链接导入一次, 或在「仅更新」里填写链接并执行一次)"
 	else
 		[ -n "$target" ] && validate_target "$target"
 		[ -n "$schedule" ] && validate_schedule "$schedule"
 	fi
-	[ -n "$url" ] && validate_arg "$url"
 
-	uci_save_settings "$enabled" "$target" "$schedule" "$url"
+	# 旧页面 (浏览器缓存未刷新) 仍会带第 4 个参数: 不写进 uci, 也不静默丢弃 ——
+	# 明确告一声, 免得用户以为自己填的链接生效了。
+	[ -n "$legacyurl" ] && echo "注意: 定时更新的订阅链接不再单独保存, 传入的链接已被忽略; 来源统一取 $WORKDIR/sources 里该配置的记录。"
+
+	uci_save_settings "$enabled" "$target" "$schedule"
 
 	# 写完 uci 立刻生效 (apply 自己会读回刚写的值)
 	do_apply
@@ -223,7 +246,6 @@ do_apply() {
 	config_get enabled  "autoupdate" "enabled"  "0"
 	config_get target   "autoupdate" "target"   ""
 	config_get schedule "autoupdate" "schedule" "$DEFAULT_SCHEDULE"
-	config_get url      "autoupdate" "url"      ""
 
 	[ -n "$schedule" ] || schedule="$DEFAULT_SCHEDULE"
 
@@ -237,13 +259,16 @@ do_apply() {
 	validate_target "$target"
 	validate_schedule "$schedule"
 	validate_arg "$target"
-	[ -n "$url" ] && validate_arg "$url"
 
 	[ -f "$WORKDIR/$target" ] \
 		|| die "目标配置不存在: $WORKDIR/$target (请先导入或创建该配置文件)"
 
+	# 链接只用来「确认有货」并展示, 不写进 cron: 命令里只留目标文件名, 由
+	# config.sh update 运行时查 sources —— 这样换目标时链接自然跟着换。
+	url="$(source_get "$target")"
+	[ -n "$url" ] || die "配置 $target 没有记录订阅链接, 无法定时更新 (请先用订阅链接导入一次, 或在「仅更新」里填写链接并执行一次)"
+
 	line="$schedule PATH=$CRON_PATH $HELPER update '$target'"
-	[ -n "$url" ] && line="$line '$url'"
 	line="$line 2>&1 | logger -t $LOG_TAG"
 
 	write_crontab "$line"
@@ -252,7 +277,7 @@ do_apply() {
 	echo "定时更新已启用"
 	echo "目标配置: $WORKDIR/$target"
 	echo "执行时间: $schedule"
-	[ -n "$url" ] && echo "来源链接: $url" || echo "来源链接: 使用该配置记录的订阅链接"
+	echo "来源链接: $url (取自 $WORKDIR/sources, 换目标配置时随之切换)"
 	echo "计划任务: $line"
 	echo "更新结果与失败原因会写入系统日志 (logger -t $LOG_TAG)。"
 }
@@ -274,7 +299,6 @@ do_status() {
 	config_get enabled  "autoupdate" "enabled"  "0"
 	config_get target   "autoupdate" "target"   ""
 	config_get schedule "autoupdate" "schedule" "$DEFAULT_SCHEDULE"
-	config_get url      "autoupdate" "url"      ""
 
 	line="$(managed_line)"
 
@@ -286,7 +310,16 @@ do_status() {
 
 	echo "目标配置: ${target:-（未选择）}"
 	echo "执行时间: ${schedule:-（未设置）}"
-	[ -n "$url" ] && echo "来源链接: $url" || echo "来源链接: 使用该配置记录的订阅链接"
+
+	url=""
+	[ -n "$target" ] && url="$(source_get "$target")"
+	if [ -n "$url" ]; then
+		echo "来源链接: $url (取自 $WORKDIR/sources)"
+	elif [ -n "$target" ]; then
+		echo "来源链接: 该配置没有记录订阅链接, 定时任务会失败 (请在「仅更新」里填写链接并执行一次)"
+	else
+		echo "来源链接: （未选择目标配置）"
+	fi
 
 	if ls /etc/rc.d/S*cron >/dev/null 2>&1; then
 		echo "cron 服务: 已设置为开机启用"
@@ -329,14 +362,15 @@ case "$cmd" in
 		;;
 	help|-h|--help|"")
 		cat <<EOF
-Usage: $0 apply | set <enabled> <target> <schedule> <url> | remove | status
+Usage: $0 apply | set <enabled> <target> <schedule> | remove | status
 
   apply   读 uci mihomo.autoupdate 并把计划任务写入 $CRONTAB
   set     用给定值写 uci mihomo.autoupdate 随后生效 (LuCI 页面用这条)
           enabled  1/0
           target   目标配置文件名, 关闭时可以留空
           schedule cron 时间字段 (5 段), 关闭时可以留空
-          url      订阅链接, 留空表示用该配置记录的链接 (见 <workdir>/sources)
+          订阅链接不在这里传: 来源统一取 <workdir>/sources 里该配置的记录
+          (兼容旧页面: 多传的第 4 个参数会被忽略并给出提示)
   remove  移除定时更新写入的计划任务
   status  打印当前状态
 EOF
