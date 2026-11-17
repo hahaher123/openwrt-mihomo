@@ -18,21 +18,29 @@
 //   (由 /usr/share/mihomo/config.sh import 完成, 下载到 /tmp 校验通过后才安装)
 // - 上传本机的 .yaml/.yml 配置文件: 内容在浏览器里读出后与编辑保存走同一条
 //   分块上传链路, 由 config.sh install 校验并原子装入 workdir
-// - 仅更新服务器和代理组: 按订阅链接重新拉取, 只替换选中配置里的
-//   proxies / proxy-groups 两段, 其余设置与手动修改都保持不动
+// - 更新订阅: 按订阅链接重新拉取, 只替换选中配置里的 proxies 段;
+//   组 / 规则 / dns / 手动修改等全部保留本地原样 —— 本地文件是权威版本。
+//   若该配置绑定了模版 (见下), 组与规则会先按模版重写再落盘
 //   (由 /usr/share/mihomo/config.sh update 完成)
+// - 配置模版 (订阅转换): 每个配置文件可绑定一份模版 (随包内置或自建),
+//   「应用模版」保留服务器、按模版重写 proxy-groups / rules; 绑定后每次
+//   更新订阅都走同一条转换 (由 config.sh template apply/bind 完成)
+// - 配置覆写 (Clash Verge Merge 风格): 每个配置文件一份独立覆写文件
+//   <workdir>/overrides/<配置名>.yaml, <键> 整段替换 / prepend-<键> /
+//   append-<键> 增删列表条目; 在模版与自定义组之后执行, 优先级最高
+//   (由 config.sh override-save 保存)
 // - 直接编辑选中的配置文件: 校验 / 保存 / 保存并重启
 //   保存与保存并重启都会先校验, 校验不通过不写文件
 //   内容不是一次性发上来的, 而是由 upload.js 切成小块分多次 RPC 追进 /tmp 的
 //   暂存文件 (一次大请求体会把 nginx 的 ubus 模块打崩), 校验通过后交给
 //   config.sh install 再校一遍并按 rename 原子装进 workdir
-// - 定时更新: 把「仅更新」写成一条 cron 计划任务 (由 /usr/share/mihomo/autoupdate.sh
+// - 定时更新: 把「更新订阅」写成一条 cron 计划任务 (由 /usr/share/mihomo/autoupdate.sh
 //   的 set/apply 写 /etc/crontabs/root, 只动它自己那块带标记的内容), 设置存在
 //   uci mihomo.autoupdate (enabled/target/schedule); 本页面只读 uci,
 //   写入交给脚本 (避开 ubus 提交带来的服务 reload, 详见 autoupdate.sh)
 //
 // 订阅链接记录在 <workdir>/sources ("<name> <url>" 每行一条), 由 config.sh
-// 在 import/update 时写入, 是链接的唯一事实源: 本页面读它预填「仅更新」的
+// 在 import/update 时写入, 是链接的唯一事实源: 本页面读它预填「更新订阅」的
 // 输入框, 并作为「定时更新」的链接显示; cron 命令本身不带链接, 由
 // config.sh update 运行时按目标文件名去查 —— 换目标就自动换链接。
 //
@@ -259,12 +267,12 @@ return view.extend({
 		return this.loadSources().then(function() {
 			self.syncSourceField();
 			// sources 重新读盘后, 定时更新的「来源链接」提示也要跟着更新
-			// (导入订阅或「仅更新」成功后链接才会出现)。
+			// (导入订阅或「更新订阅」成功后链接才会出现)。
 			self.refreshAutoSourceInfo();
 		});
 	},
 
-	// 把选中项记录的订阅链接同步到「仅更新」的输入框。
+	// 把选中项记录的订阅链接同步到「更新订阅」的输入框。
 	// replace 为真时无条件覆盖输入框 (切换选中项时必须覆盖, 否则会残留上一项的
 	// 链接而造成更新到错误的目标)。
 	syncSourceField: function(replace) {
@@ -446,6 +454,10 @@ return view.extend({
 		if (this.customOffBox)
 			this.buildCustomOffList(entries || []);
 
+		// 同步刷新「模版与覆写」的目标下拉 (与配置文件清单同源)
+		if (this._tplProfSel)
+			this.buildTplProfiles(entries || []);
+
 		while (this.listBox.firstChild)
 			this.listBox.removeChild(this.listBox.firstChild);
 
@@ -550,7 +562,7 @@ return view.extend({
 	},
 
 	CUSTOM_TEMPLATE:
-		'# 自定义代理组: 对所有配置文件的「仅更新」生效, 按组名判重, 订阅已有的组以订阅为准。\n' +
+		'# 自定义代理组: 对所有配置文件的「更新订阅」生效, 按组名判重, 订阅已有的组以订阅为准。\n' +
 		'# 必须以 proxy-groups: 块为主体。\n' +
 		'proxy-groups:\n' +
 		"    - { name: 自动测速, type: url-test, proxies: [香港, 东京, 新加坡, 美国], url: 'http://www.gstatic.com/generate_204', interval: 1800, tolerance: 50 }\n",
@@ -597,6 +609,263 @@ return view.extend({
 					out || _('(无输出)'));
 			}, function(e) {
 				self.setResult('err', _('保存自定义组失败'), String((e && e.message) || e));
+			});
+	},
+
+	// ---------------- 模版与覆写 ----------------
+
+	// 模版 = 订阅转换的「转换目标」: 保留服务器, 重写 proxy-groups / rules。
+	// 每个配置文件可绑定一份 (uci mihomo.main.template_map), 绑定后更新订阅
+	// 也走同一条转换; 另有 per-profile 覆写文件 (overrides/<配置名>.yaml),
+	// 在模版与自定义组之后执行, 优先级最高。
+
+	tplProfSel: function() {
+		return this._tplProfSel ? this._tplProfSel.value : '';
+	},
+
+	// uci 里的模版绑定 (只读): list 元素 "<profile>=<tpl-id>"
+	tplBindings: function() {
+		var m = uci.get('mihomo', 'main', 'template_map') || [];
+		var map = {};
+		for (var i = 0; i < m.length; i++) {
+			var p = m[i].indexOf('=');
+			if (p > 0)
+				map[m[i].slice(0, p)] = m[i].slice(p + 1);
+		}
+		return map;
+	},
+
+	// 模版下拉: 第一项固定「不使用模版」, 其后 builtin:/user: 全部模版
+	loadTemplates: function() {
+		var self = this;
+
+		return fs.exec(HELPER, [ 'template', 'list' ]).then(function(res) {
+			var sel = self._tplSel;
+			while (sel.options.length)
+				sel.remove(0);
+
+			sel.appendChild(E('option', { 'value': '' }, [ _('(不使用模版)') ]));
+
+			var lines = ((res && res.stdout) || '').split('\n');
+			for (var i = 0; i < lines.length; i++) {
+				var tab = lines[i].indexOf('\t');
+				if (tab < 0)
+					continue;
+				var id = lines[i].slice(0, tab);
+				var desc = lines[i].slice(tab + 1);
+				sel.appendChild(E('option', { 'value': id },
+					[ id + ' — ' + desc ]));
+			}
+
+			// 恢复当前选中 profile 的绑定 (若有)
+			self.syncTplSelection();
+		});
+	},
+
+	// 依据目标 profile 与 uci 绑定, 同步模版下拉的选中项与绑定提示
+	syncTplSelection: function() {
+		var name = this.tplProfSel();
+		var bound = this.tplBindings()[name] || '';
+		var sel = this._tplSel;
+
+		this._tplBindInfo.textContent = bound
+			? _('当前绑定: %s (更新订阅时组与规则按该模版重写)').format(bound)
+			: _('当前未绑定模版 (更新订阅时组与规则沿用订阅自带内容)。');
+
+		for (var i = 0; i < sel.options.length; i++)
+			if (sel.options[i].value == bound) {
+				sel.selectedIndex = i;
+				return;
+			}
+		sel.selectedIndex = 0;
+	},
+
+	// 目标 profile 下拉与配置文件清单同源; 选中变化时刷新模版选中态与覆写编辑区
+	buildTplProfiles: function(entries) {
+		var self = this;
+		var names = this.sortedNames(entries || []);
+		var sel = this._tplProfSel;
+		var prev = sel.value || this.selected || '';
+
+		while (sel.options.length)
+			sel.remove(0);
+
+		for (var i = 0; i < names.length; i++)
+			sel.appendChild(E('option', { 'value': names[i].name }, [ names[i].name ]));
+
+		if (!names.length) {
+			sel.appendChild(E('option', { 'value': '' }, [ _('(目录下没有配置文件)') ]));
+		} else {
+			for (var j = 0; j < sel.options.length; j++)
+				if (sel.options[j].value == prev) {
+					sel.selectedIndex = j;
+					break;
+				}
+		}
+
+		this.syncTplSelection();
+		this.loadTplPreview();
+		return this.loadOverrideContent();
+	},
+
+	handleTplProfChange: function(ev) {
+		this.syncTplSelection();
+		this.loadTplPreview();
+		return this.loadOverrideContent();
+	},
+
+	// 模版预览: 选中即拉一份模版全文 (含 template-info 头), 只读展示
+	loadTplPreview: function() {
+		var self = this;
+		var id = this._tplSel.value;
+
+		if (!id) {
+			this._tplPreview.textContent = _('未选择模版。应用后仍保留服务器与 dns / sniffer 等其余段落。');
+			return;
+		}
+
+		fs.exec(HELPER, [ 'template', 'show', id ]).then(function(res) {
+			var out = ((res && res.stdout) || '');
+			self._tplPreview.textContent = out || _('(模版为空)');
+		}, function(e) {
+			self._tplPreview.textContent = _('读取模版失败: %s').format(String((e && e.message) || e));
+		});
+	},
+
+	handleTplSelChange: function(ev) {
+		this.loadTplPreview();
+	},
+
+	handleTplApply: function(ev) {
+		var self = this;
+		var name = this.tplProfSel();
+		var id = this._tplSel.value;
+
+		if (!name) {
+			this.setResult('warn', _('请先选择目标配置文件'), '');
+			return;
+		}
+		if (!id) {
+			this.setResult('warn', _('当前选择的是「不使用模版」'),
+				_('不做任何转换。要重写组与规则请先在下拉里选一份模版。'));
+			return;
+		}
+
+		this.setResult('info', _('正在应用模版 %s …').format(id), '', true);
+
+		return fs.exec(HELPER, [ 'template', 'apply', name, id ]).then(function(res) {
+			var ok = (res && res.code == 0);
+			var out = joinOutput(res);
+
+			self.setResult(ok ? 'ok' : 'err',
+				ok ? _('模版已应用') : _('应用模版失败 (退出码 %s)').format(res ? res.code : '?'),
+				out || _('(无输出)'));
+
+			if (!ok)
+				return;
+
+			// 若改的是当前编辑中的文件, 编辑区一并刷新
+			return self.refreshList().then(function() {
+				if (self.selected)
+					return self.handlePick(self.selected);
+			});
+		}, function(e) {
+			self.setResult('err', _('应用模版无法执行'), String(e.message || e));
+		});
+	},
+
+	// 保存模版绑定: 选「不使用模版」时等价于清除绑定 (bind -)
+	handleTplBind: function(ev) {
+		var self = this;
+		var name = this.tplProfSel();
+		var id = this._tplSel.value;
+
+		if (!name) {
+			this.setResult('warn', _('请先选择目标配置文件'), '');
+			return;
+		}
+
+		this.setResult('info', _('正在保存模版绑定…'), '', true);
+
+		return fs.exec(HELPER, [ 'template', 'bind', name, id || '-' ]).then(function(res) {
+			var ok = (res && res.code == 0);
+			var out = joinOutput(res);
+
+			self.setResult(ok ? 'ok' : 'err',
+				ok ? _('模版绑定已保存') : _('保存绑定失败 (退出码 %s)').format(res ? res.code : '?'),
+				out || _('(无输出)'));
+
+			if (ok) {
+				// 绑定写进 uci 了, 重新拉一次界面缓存
+				return uci.load('mihomo').then(function() {
+					self.syncTplSelection();
+				});
+			}
+		}, function(e) {
+			self.setResult('err', _('保存绑定无法执行'), String(e.message || e));
+		});
+	},
+
+	overridePath: function(name) {
+		return this.cfg().workdir + '/overrides/' + name + '.yaml';
+	},
+
+	OVERRIDE_TEMPLATE:
+		'# 覆写: 只对上面选中的配置文件生效, 在模版与自定义组之后执行 (优先级最高)。\n' +
+		'# <键>:            该段整块替换 (如 dns:)\n' +
+		'# prepend-<键>:    条目插到该键列表最前 (rules / proxies / proxy-groups …)\n' +
+		'# append-<键>:     条目追加到该键列表最后\n' +
+		'# 注意: rules 若以 MATCH 结尾, append 进来的规则在其后不会生效, 请用 prepend。\n' +
+		'# 留空保存 = 停用覆写。最终结果仍会过 mihomo -t 校验, 不通过不落盘。\n' +
+		'append-rules:\n' +
+		'  - DOMAIN-SUFFIX,example.org,DIRECT\n',
+
+	loadOverrideContent: function() {
+		var self = this;
+		var name = this.tplProfSel();
+
+		if (!name) {
+			cmeditor.setValue(this.ovTa, '');
+			return Promise.resolve();
+		}
+
+		return L.resolveDefault(fs.read(this.overridePath(name)), '').then(function(text) {
+			cmeditor.setValue(self.ovTa, text || self.OVERRIDE_TEMPLATE);
+		}, function() {
+			cmeditor.setValue(self.ovTa, self.OVERRIDE_TEMPLATE);
+		});
+	},
+
+	handleOverrideSave: function(ev) {
+		var self = this;
+		var name = this.tplProfSel();
+		var content = cmeditor.getValue(this.ovTa) || '';
+
+		if (!name) {
+			this.setResult('warn', _('请先选择目标配置文件'), '');
+			return;
+		}
+
+		var stage = '/tmp/mihomo-config-upload.override.' + Date.now() + '.yaml';
+
+		this.setResult('info', _('正在保存覆写…'), '', true);
+
+		return this.writeChunked(stage, content, this.progressReporter(_('正在保存覆写…')))
+			.then(function(result) {
+				if (!result || result.ok === false)
+					throw { message: (result && result.message) || '?' };
+
+				return fs.exec(HELPER, [ 'override-save', name, stage ]);
+			})
+			.then(function(res) {
+				var ok = (res && res.code == 0);
+				var out = joinOutput(res);
+
+				self.setResult(ok ? 'ok' : 'err',
+					ok ? _('覆写已保存') : _('保存覆写失败 (退出码 %s)').format(res ? res.code : '?'),
+					out || _('(无输出)'));
+			}, function(e) {
+				self.setResult('err', _('保存覆写失败'), String((e && e.message) || e));
 			});
 	},
 
@@ -699,7 +968,7 @@ return view.extend({
 		});
 	},
 
-	// ---------------- 动作: 仅更新服务器和代理组 ----------------
+	// ---------------- 动作: 更新订阅 ----------------
 
 	// 内容有没有变、要不要重启服务, 都由脚本判断后决定, 页面不再单独提供
 	// 「并重启」按钮 —— 那样两个按钮的行为会完全一样。
@@ -739,7 +1008,7 @@ return view.extend({
 			if (String(disk == null ? '' : disk) !== String(cmeditor.getValue(self.ta) || '')) {
 				self.setResult('warn', _('请先保存或放弃编辑区的修改'),
 					_('编辑区内容与磁盘上的 %s 不一致。').format(path) + '\n' +
-					_('「仅更新」只基于磁盘上的文件内容, 未保存的修改不会被纳入, 更新成功后编辑区也会被刷新。'));
+					_('「更新订阅」只基于磁盘上的文件内容, 未保存的修改不会被纳入, 更新成功后编辑区也会被刷新。'));
 				return;
 			}
 
@@ -766,9 +1035,9 @@ return view.extend({
 					if (kind === 'unchanged')
 						self.setResult('ok', _('配置无变化, 未做改动'), out);
 					else if (kind === 'updated-restarted')
-						self.setResult('ok', _('已更新服务器和代理组, 并重启服务'), out + self.restartNote());
+						self.setResult('ok', _('已更新订阅, 并重启服务'), out + self.restartNote());
 					else
-						self.setResult('ok', _('已更新服务器和代理组'), out + self.restartNote());
+						self.setResult('ok', _('已更新订阅'), out + self.restartNote());
 				});
 			}, function(e) {
 				// 权限不足等 RPC 级失败走这里, 此时没有 code 可看
@@ -1096,7 +1365,7 @@ return view.extend({
 	// uci 里的定时更新设置。autoupdate.sh 用 config_get 读同名的三项,
 	// 所以这里的键名必须与脚本一致 (enabled / target / schedule)。
 	// 订阅链接刻意不在 uci 里: 链接只存在于 <workdir>/sources (导入订阅或手动
-	// 「仅更新」时记录), 定时任务按目标文件名去查。早先把链接快照进 uci 是
+	// 「更新订阅」时记录), 定时任务按目标文件名去查。早先把链接快照进 uci 是
 	// 「换了目标配置、链接还是上一个」的根源, 现在整条链路只有一个来源。
 	// 只读不写: 写由 autoupdate.sh set 用命令行 uci 完成 (见该脚本的说明)。
 	autoSettings: function() {
@@ -1193,7 +1462,7 @@ return view.extend({
 		else {
 			this.autoSrcInfo.style.cssText = 'margin:10px 0; padding:8px 10px; border-radius:6px; font-size:0.92em;' + bad;
 			this.autoSrcInfo.textContent =
-				_('%s 没有记录订阅链接, 定时任务无法执行; 请在上方「仅更新」的输入框里填写链接并执行一次, 或改用订阅链接重新导入该配置。').format(name);
+				_('%s 没有记录订阅链接, 定时任务无法执行; 请在上方「更新订阅」的输入框里填写链接并执行一次, 或改用订阅链接重新导入该配置。').format(name);
 		}
 	},
 
@@ -1246,7 +1515,7 @@ return view.extend({
 			// 页面上先拦一次, 免得到服务端才发现没记录。
 			if (!((this.sources || {})[target] || '')) {
 				this.setResult('warn', _('%s 没有记录订阅链接, 无法启用定时更新').format(target),
-					_('请在上方「仅更新」的输入框里填写链接并对该配置执行一次 (成功后链接会被记录), 或改用订阅链接重新导入。'));
+					_('请在上方「更新订阅」的输入框里填写链接并对该配置执行一次 (成功后链接会被记录), 或改用订阅链接重新导入。'));
 				return Promise.resolve();
 			}
 
@@ -1478,7 +1747,7 @@ return view.extend({
 			'style': 'padding:5px; border:1px solid #e2e2e2; border-radius:6px; background:#fff;'
 		}, []);
 
-		// ---- 仅更新表单 ----
+		// ---- 更新订阅表单 ----
 		this.updInfo = E('div', {
 			'style': 'margin:10px 0; padding:8px 10px; border-left:4px solid #1565c0; background:#e8f0fe; color:#0d47a1; border-radius:6px; font-size:0.92em;'
 		}, [ '' ]);
@@ -1497,6 +1766,31 @@ return view.extend({
 		}, []);
 
 		this.customOffBox = E('div', {}, []);
+
+		// ---- 模版与覆写 ----
+		this._tplProfSel = E('select', {
+			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff; font-family:monospace; min-width:180px;',
+			'change': ui.createHandlerFn(this, 'handleTplProfChange')
+		}, []);
+
+		this._tplSel = E('select', {
+			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff; font-family:monospace; min-width:260px; max-width:100%;',
+			'change': ui.createHandlerFn(this, 'handleTplSelChange')
+		}, []);
+
+		this._tplBindInfo = E('div', {
+			'style': 'color:#555; font-size:0.92em; margin-top:4px;'
+		}, []);
+
+		this._tplPreview = E('pre', {
+			'style': 'margin:6px 0; padding:8px 10px; background:rgba(0,0,0,0.04); border-radius:6px; font-size:0.85em; overflow:auto; max-height:260px; white-space:pre;'
+		}, []);
+
+		this.ovTa = E('textarea', {
+			'rows': 12,
+			'spellcheck': 'false',
+			'style': 'width:100%; font-family:monospace; white-space:pre; padding:8px; border:1px solid #e2e2e2; border-radius:6px; background:#f6f6f6;'
+		}, []);
 
 		// ---- 定时更新表单 ----
 		this.autoEnabled = E('input', { 'type': 'checkbox' }, []);
@@ -1520,7 +1814,7 @@ return view.extend({
 		}, []);
 
 		// 来源链接只显示、不编辑: 唯一事实源是 <workdir>/sources (导入订阅或
-		// 手动「仅更新」时写入), 页面上再放一个输入框就会产生第二份真相,
+		// 手动「更新订阅」时写入), 页面上再放一个输入框就会产生第二份真相,
 		// 换目标时忘记跟着改, 就会拿错链接去更新别的文件。
 		this.autoSrcInfo = E('div', {
 			'style': 'margin:10px 0; padding:8px 10px; border-radius:6px; font-size:0.92em;'
@@ -1597,6 +1891,29 @@ return view.extend({
 				btn(_('导入'), 'handleImport')
 			]),
 
+			E('h3', {}, [ _('模版与覆写 (按配置文件)') ]),
+			E('div', { 'class': 'cbi-map-descr' }, [
+				_('目标配置文件选定后: 模版用于订阅转换 —— 应用时保留服务器 (proxies), 把 proxy-groups / rules 整体重写成模版定义的分组与规则 (地区组按节点名正则自动收节点), dns 里的 "#组名" 后缀也会改写到模版的主选择组; 绑定模版后每次「更新订阅」都走同一条转换。覆写是最后一层定制 (优先级最高): <键> 整段替换, prepend-<键> / append-<键> 向列表头/尾增删条目。转换与覆写的结果都会过 mihomo -t 校验, 不通过不落盘。')
+			]),
+			E('div', { 'style': 'display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:10px 0 6px 0;' }, [
+				E('span', { 'style': 'color:#555;' }, [ _('目标配置:') ]),
+				this._tplProfSel,
+				E('span', { 'style': 'color:#555; margin-left:12px;' }, [ _('模版:') ]),
+				this._tplSel,
+				btn(_('应用模版'), 'handleTplApply'),
+				btn(_('保存模版绑定'), 'handleTplBind', 'cbi-button')
+			]),
+			this._tplBindInfo,
+			this._tplPreview,
+
+			E('div', { 'style': 'margin:14px 0 6px 0; color:#555;' }, [
+				_('覆写 (只对上面选中的配置文件生效; 留空保存即停用):')
+			]),
+			this.ovTa,
+			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin:10px 0;' }, [
+				btn(_('保存覆写'), 'handleOverrideSave', 'cbi-button')
+			]),
+
 			E('h3', {}, [ _('上传本地配置文件') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
 				_('把本机的 .yaml/.yml 配置文件上传到 %s。内容与「保存」走同一条链路: 分块暂存到 /tmp, mihomo -t 校验通过后才写入; workdir 里已有同名配置时会先确认再覆盖。').format(c.workdir)
@@ -1617,23 +1934,23 @@ return view.extend({
 				btn(_('删除选中的配置'), 'handleDeleteCfg', 'cbi-button cbi-button-remove')
 			]),
 
-			E('h3', {}, [ _('仅更新服务器和代理组') ]),
+			E('h3', {}, [ _('更新订阅') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('按订阅链接重新拉取 proxies 与 proxy-groups。本地自定义组 (见下方「自定义代理组」) 会保留并追加到订阅组后, 组名自动补进订阅的 select 组; 勾选开关里关闭合并的 profile 除外。其余设置 (rules / dns / tun 等) 保持不动。'),
+				_('按订阅链接重新拉取服务器节点 (proxies)。订阅只提供 proxies, 其余段落以本地为准: 绑定了模版的配置会走模版转换 (见上方「模版与覆写」), 未绑定模版的配置沿用订阅自带的 proxy-groups 并追加自定义组 (见下方「自定义代理组」, 勾选开关里关闭合并的 profile 除外)。最后应用该配置的覆写文件。'),
 				E('br'),
-				_('流程: 下载 → 提取两段 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。'),
+				_('流程: 下载 → 提取 proxies → 生成组与规则 (模版转换或订阅组替换) → 追加自定义组 → 应用覆写 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。'),
 				E('br'),
-				_('两段内容与本地一致时不会写盘, 也不会重启服务; 只有内容确实变了才写入并重启 (仅当更新的正是当前生效的配置、且服务正在运行时)。')
+				_('生成内容与本地一致时不会写盘, 也不会重启服务; 只有内容确实变了才写入并重启 (仅当更新的正是当前生效的配置、且服务正在运行时)。')
 			]),
 			this.updInfo,
 			E('div', { 'style': 'margin:10px 0 6px 0;' }, [ this.updUrl ]),
 			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px;' }, [
-				btn(_('仅更新'), 'handleUpdateCfg')
+				btn(_('更新'), 'handleUpdateCfg')
 			]),
 
 			E('h3', {}, [ _('自定义代理组 (订阅更新时保留)') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('写在下面的自定义组 (任意类型) 保存在 %s, 对所有配置文件的「仅更新」生效, 不随订阅更新丢失, 换订阅也不用重写。更新时按组名判重: 订阅已有的组以订阅为准, 自定义组追加到订阅组后, 组名自动补进订阅各 select 组供手动选择。').format(c.workdir + '/custom.d/custom-groups.yaml'),
+				_('写在下面的自定义组 (任意类型) 保存在 %s, 对所有配置文件的「更新订阅」生效, 不随订阅更新丢失, 换订阅也不用重写。未绑定模版的配置更新时按组名判重: 订阅已有的组以订阅为准, 自定义组追加到订阅组后, 组名自动补进订阅各 select 组供手动选择; 绑定模版的配置会先按模版生成组, 再追加自定义组。').format(c.workdir + '/custom.d/custom-groups.yaml'),
 				E('br'),
 				_('文件必须是 proxy-groups: 块, 例如:')
 			]),
@@ -1647,16 +1964,16 @@ return view.extend({
 
 			E('h3', {}, [ _('自定义组合并开关 (按配置文件)') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('勾选 = 更新该配置文件时合并自定义组 (默认); 取消勾选 = 该配置完全按订阅原始内容更新。开关保存在 uci mihomo.main.custom_groups_off。')
+				_('勾选 = 更新该配置文件时追加自定义组 (默认); 取消勾选 = 该配置不加自定义组 (绑定模版的配置仍会按模版转换)。开关保存在 uci mihomo.main.custom_groups_off。')
 			]),
 			E('div', { 'style': 'margin:10px 0;' }, [ this.customOffBox ]),
 			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px;' }, [
 				btn(_('保存合并开关'), 'handleCustomOffSave', 'cbi-button')
 			]),
 
-			E('h3', {}, [ _('定时更新服务器和代理组') ]),
+			E('h3', {}, [ _('定时更新订阅') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('启用后会写入一条计划任务 (cron), 按设定的频率对选中的配置文件执行与「仅更新」完全相同的流程: 下载订阅 → 只替换 proxies / proxy-groups 两段 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。'),
+				_('启用后会写入一条计划任务 (cron), 按设定的频率对选中的配置文件执行与「更新订阅」完全相同的流程: 下载订阅 → 只提取 proxies → 生成组与规则 (绑模版走转换, 未绑沿用订阅组) → 追加自定义组 → 应用覆写 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。'),
 				E('br'),
 				_('内容与本地一致时什么都不做 (既不写盘也不重启); 内容有变化时更新配置并重启服务, 让新服务器立即生效。其余设置不会被改动; 每次结果与失败原因写入系统日志 (logread, 标签 mihomo-autoupdate)。'),
 				E('br'),
@@ -1721,6 +2038,7 @@ return view.extend({
 		this.applyRestartSettings();
 		this.refreshRestartStatus();
 		this.loadCustomContent();
+		this.loadTemplates();
 
 		if (data.error)
 			this.setResult('err', _('读取目录 %s 失败').format(c.workdir), data.error, true);

@@ -1,0 +1,89 @@
+# =====================================================================
+# mihomo 配置模版 —— 经典分组 (ACL4SSR 风格)
+# =====================================================================
+# 这不是一份可直接运行的配置，而是「转换目标」的描述。转换程序
+# (config.sh template apply / update) 保留原配置里的服务器
+# (proxies / proxy-providers) 与 dns / sniffer / rules 之外的所有段落，
+# 只把下面三段整体替换进目标配置：
+#   proxy-groups   地区组按 filter 正则自动收节点 (include-all)，无需改节点名
+#   rules          纯 GEOSITE / GEOIP 内联规则，不依赖外部 ruleset URL
+#   rule-providers 本模版不使用；目标配置里已有的 rule-providers 段会被移除
+#
+# template-info.adapter 指定主选择组名：转换程序会把目标配置 dns 段里
+# nameserver 的 "#组名" 后缀重写成这个组名，DNS 出站继续锁定主组 (防环)。
+# =====================================================================
+template-info:
+  name: 经典分组 (ACL4SSR 风格)
+  desc: 地区自动分组 + 总选择 + 自动测速; GEOSITE/GEOIP 内联规则, 无外部 ruleset 依赖
+  adapter: 🚀 节点选择
+
+proxy-groups:
+    - name: 🚀 节点选择
+      type: select
+      proxies: [♻️ 自动选择, DIRECT]
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: ♻️ 自动选择
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: 🇭🇰 香港
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)香港|港|hk|hong ?kong|🇭🇰"
+    - name: 🇹🇼 台湾
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)台湾|臺灣|台|新北|彰化|tw|taiwan|🇹🇼"
+    - name: 🇯🇵 日本
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)日本|东京|大阪|埼玉|川日|泉日|沪日|深日|jp|japan|🇯🇵"
+    - name: 🇰🇷 韩国
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)韩国|韓國|首尔|首爾|韩|kr|korea|🇰🇷"
+    - name: 🇸🇬 新加坡
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)新加坡|狮城|獅城|坡|sg|singapore|🇸🇬"
+    - name: 🇺🇸 美国
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)美国|美|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|凤凰城|费利蒙|拉斯维加斯|波特兰|达拉斯|俄勒冈|硅谷|us|united ?states|🇺🇸"
+    - name: 🌍 其它地区
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium|香港|港|hk|hong ?kong|🇭🇰|台湾|臺灣|台|新北|彰化|tw|taiwan|🇹🇼|日本|东京|大阪|埼玉|川日|泉日|沪日|深日|jp|japan|🇯🇵|韩国|韓國|首尔|首爾|韩|kr|korea|🇰🇷|新加坡|狮城|獅城|坡|sg|singapore|🇸🇬|美国|美|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|凤凰城|费利蒙|拉斯维加斯|波特兰|达拉斯|俄勒冈|硅谷|us|united ?states|🇺🇸"
+
+rules:
+    - GEOSITE,private,DIRECT
+    - GEOSITE,category-ads-all,REJECT
+    - GEOSITE,cn,DIRECT
+    - GEOIP,private,DIRECT,no-resolve
+    - GEOIP,CN,DIRECT
+    - MATCH,🚀 节点选择

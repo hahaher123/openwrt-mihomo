@@ -1,0 +1,31 @@
+# =====================================================================
+# mihomo 配置模版 —— 精简分组
+# =====================================================================
+# 与 classic-groups.yaml 同一套转换规则 (见该文件头注释)，区别只在组与
+# 规则的数量：两个组 + 最短规则，适合节点数少或不想管地区组的订阅。
+# =====================================================================
+template-info:
+  name: 精简分组
+  desc: 总选择 + 自动测速两个组; GEOSITE/GEOIP 最短规则, 无外部 ruleset 依赖
+  adapter: 🚀 节点选择
+
+proxy-groups:
+    - name: 🚀 节点选择
+      type: select
+      proxies: [♻️ 自动选择, DIRECT]
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: ♻️ 自动选择
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+
+rules:
+    - GEOSITE,private,DIRECT
+    - GEOSITE,cn,DIRECT
+    - GEOIP,private,DIRECT,no-resolve
+    - GEOIP,CN,DIRECT
+    - MATCH,🚀 节点选择

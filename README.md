@@ -49,7 +49,7 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 | 运行状态 | 服务状态 / PID / 开机自启 / 程序版本（5 秒刷新）；一键启停；运行日志面板（最新 200 行、可逐页上翻回查到日志开头、日志存放位置与文件大小、可清空、可改上限） |
 | 运行参数 | 编辑 `/etc/config/mihomo`：enabled、conffile、workdir、user、ifaces、日志开关、dashboard；保存并应用即重启生效 |
 | 透明代理 | 开关透明代理（启动前加载策略路由与 nft 规则，停止时移除）；在线编辑 `tproxy.sh` / `clash.nft`；一键检查规则状态 |
-| 配置文件 | 列出 / 编辑 / 校验 / 切换 / 删除 workdir 下的配置文件；远程导入订阅；上传本地配置文件；仅更新与定时更新服务器和代理组 |
+| 配置文件 | 列出 / 编辑 / 校验 / 切换 / 删除 workdir 下的配置文件；远程导入订阅；上传本地配置文件；模版转换与 per-profile 覆写；更新订阅与定时更新订阅 |
 | 后台管理 | 内嵌 external-ui 仪表盘（metacubexd / yacd 等），默认走同源反代 `/mihomo-ui/`（nginx locations 随包自带，http/https 自适应，https 下不被浏览器混合内容策略拦截）；可在「运行参数」页改回直连地址（如 `http://<路由器>:9090/ui`） |
 
 **启动输出与排障**（`/etc/init.d/mihomo`）：
@@ -71,7 +71,9 @@ APK 会自动安装 kmod-tun、kmod-inet-diag、kmod-netlink-diag 等内核依�
 - **校验先行**：保存 / 保存并重启 / 远程导入都先用 `mihomo -t` 校验（参数与服务启动一致，在 `/tmp` 进行），不通过不写盘；配置文件权限 `0600`（含订阅凭据）
 - **远程导入**：下载到 `/tmp` → 校验 → 安装，任何一步失败不落盘、不覆盖同名文件；gzip / base64 订阅自动解码
 - **上传与删除**：上传本机 `.yaml` 走与保存相同的分块暂存 + 校验链路，同名覆盖前先确认；删除在页面确认后执行，当前生效的配置一律拒删，文件与其订阅链接记录一并移除
-- **仅更新 / 定时更新**：按订阅重拉后只替换 `proxies` 与 `proxy-groups` 两段，其余内容原样保留；本地自定义代理组（任意类型，统一维护在 `<workdir>/custom.d/custom-groups.yaml`，置于子目录以避免被识别为配置文件）会在更新时按组名判重保留并追加到订阅组之后，组名自动补进订阅的 select 组，LuCI 配置页可按 profile 勾选关闭合并。与本地一致时不写盘不重启，有变化才写入并重启服务。订阅链接记录在 `<workdir>/sources`，更新无需重填。定时更新即把同一流程挂为 cron（只写在页面管理的标记块里，不影响手工 crontab），计划任务只记目标文件名、运行时常按名字取 `sources` 里的链接，换目标时来源自动跟随；目标没有记录链接时拒绝启用。结果写入系统日志（标签 `mihomo-autoupdate`）
+- **模版转换（订阅转换）**：每个配置文件可绑定一份「模版」（`config.sh template`，随包内置经典分组 / 精简两份，也可放 `<workdir>/templates/` 自建）。应用模版 = 保留服务器（proxies / proxy-providers）与 dns / sniffer 等其余段落，把 `proxy-groups` / `rules` 整体重写成模版定义的分组与规则——地区组用 `include-all: true` + 正则 `filter` 自动收节点；dns 里 `#组名` 出站后缀同步重写为模版主组（防 DNS 环路）。转换与手动更新走同一套校验链路，`mihomo -t` 不通过不落盘
+- **per-profile 覆写（Verge Merge 语义）**：每个配置文件可有一份独立覆写文件 `<workdir>/overrides/<配置名>.yaml`（LuCI 页面直接编辑）：`<键>` 整段替换、`prepend-<键>` 插到列表最前、`append-<键>` 追加到列表最后（注意 rules 以 MATCH 结尾时追加在其后的条目不会生效）。留空保存即停用。覆写在模版与自定义组之后执行、优先级最高，结果同样过 `mihomo -t`
+- **更新订阅 / 定时更新订阅**：按订阅重拉后只提取 `proxies`（订阅只提供服务器），组与规则按来源生成——绑定了模版的配置走模版转换，未绑定的沿用订阅自带 `proxy-groups`（旧行为）；之后统一追加本地自定义代理组（任意类型，统一维护在 `<workdir>/custom.d/custom-groups.yaml`，置于子目录以避免被识别为配置文件；未绑模版时按组名判重追加到订阅组之后并补进 select 组，LuCI 配置页可按 profile 勾选关闭追加），最后应用该配置的覆写文件。与本地一致时不写盘不重启，有变化才写入并重启服务。订阅链接记录在 `<workdir>/sources`，更新无需重填。定时更新即把同一流程挂为 cron（只写在页面管理的标记块里，不影响手工 crontab），计划任务只记目标文件名、运行时常按名字取 `sources` 里的链接，换目标时来源自动跟随；目标没有记录链接时拒绝启用。结果写入系统日志（标签 `mihomo-autoupdate`）
 - **定时重启服务**：低峰时段自动 `restart` mihomo（释放连接状态与内存），同一套 cron 标记块机制，不影响手工 crontab 与定时更新任务
 
 > [!NOTE]

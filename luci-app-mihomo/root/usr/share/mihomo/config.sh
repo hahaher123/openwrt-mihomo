@@ -41,6 +41,9 @@
 
 PROG="/usr/bin/mihomo"
 INITD="/etc/init.d/mihomo"
+# 随包发布的配置模版 (转换目标: proxy-groups / rules / rule-providers)。
+# 用户自建模版放 <workdir>/templates/, 两处都出现在 LuCI 的模版下拉里。
+TPL_BUILTIN="/usr/share/mihomo/templates"
 
 # 下载: 单次请求整体超时(秒) / curl 的连接阶段超时 / 总尝试次数 /
 # 首次重试前的等待(秒, 之后翻倍) / 等待上限(秒)
@@ -91,19 +94,52 @@ Usage: $0 import <url> [name] [force]
           name    target file name inside the work directory; the target is
                   replaced
 
-  update  name    existing profile whose "proxies" and "proxy-groups" sections
-                  should be refreshed
+  update  name    existing profile whose "proxies" section should be refreshed
+                  from the subscription. Everything else (proxy-groups, rules,
+                  dns, manual edits) stays local: it is the authoritative
+                  version. When the profile is bound to a template (see below)
+                  proxy-groups / rules / rule-providers are rewritten from that
+                  template first, then custom groups are appended.
           url     subscription URL; when omitted the URL recorded for that
                   profile (see <workdir>/sources) is used
+
+  template list           list available templates: "id<TAB>description".
+          show <id>       print a template file
+          apply <name> <id>
+                          convert profile <name> with template <id> right now
+                          (proxies untouched, no subscription download)
+          bind <name> <id>
+                          bind <name> to template <id> ("-" clears) via
+                          uci mihomo.main.template_map; a bound profile has
+                          its groups/rules rewritten from the template on
+                          every "update"
+
+  Template sources: /usr/share/mihomo/templates (bundled, id prefix
+  "builtin:") and <workdir>/templates (user made, id prefix "user:"). A
+  template is NOT a runnable config: it describes the conversion target —
+  template-info (name/desc/adapter), proxy-groups, rules, optional
+  rule-providers. The converter keeps the profile's servers and every other
+  section, replaces those blocks, and rewrites the dns nameserver "#group"
+  suffixes to the template's adapter group so the DNS egress stays pinned.
 
   custom-save stage
                   install a staged file (/tmp/mihomo-config-upload.*) as
                   <workdir>/custom.d/custom-groups.yaml. That file holds
-                  the user's own proxy groups; on every "update" they are
-                  merged into the profile and their names are injected
-                  into the subscription's select groups. Profiles listed
-                  in the uci list mihomo.main.custom_groups_off are
-                  skipped.
+                  the user's own proxy groups; after a template conversion
+                  ("update" of a bound profile or "template apply") they are
+                  appended to the converted groups, same-name template groups
+                  win. Profiles listed in the uci list
+                  mihomo.main.custom_groups_off are skipped.
+
+  override-save <name> <stage>
+                  install a staged file (/tmp/...) as
+                  <workdir>/overrides/<name>.yaml — the per-profile override
+                  (Clash Verge "Merge" style). Top-level keys: "<key>" replaces
+                  that whole block; "prepend-<key>" / "append-<key>" insert
+                  items at the front / back of that list. The override is the
+                  last layer applied by both "update" and "template apply",
+                  above templates and custom groups. An empty staged file
+                  clears (disables) the override.
 
   remove  name    profile to delete from the work directory. The currently
                   selected config (uci mihomo.main.conffile) is refused; its
@@ -115,13 +151,14 @@ Usage: $0 import <url> [name] [force]
 Everything downloaded or staged is validated with "mihomo -t" before it
 replaces anything on disk, and the replacement happens through a rename inside
 the work directory, so the target file is either the old or the new one and
-never a half written one. "update" only touches the "proxies" and
-"proxy-groups" sections: every other setting in the local file, including
-manual edits, is left untouched. If those two sections turn out to be identical
-to what is already in the file, nothing is written at all and mihomo is not
-restarted; otherwise the file is updated and mihomo is restarted so that the
-new servers take effect immediately. The last line of the output is a machine
-readable "RESULT: unchanged|updated|updated-restarted" marker.
+never a half written one. "update" only replaces the "proxies" section (plus
+the template conversion described above): every other setting in the local
+file, including manual edits, is left untouched. If the result turns out to be
+identical to what is already in the file, nothing is written at all and mihomo
+is not restarted; otherwise the file is updated and mihomo is restarted so
+that the new servers take effect immediately. The last line of the output is a
+machine readable "RESULT: unchanged|updated|updated-restarted|applied|
+applied-restarted|bound" marker.
 EOF
 }
 
@@ -135,6 +172,7 @@ load_config() {
 	WORKDIR="/etc/mihomo"
 	CONFFILE="/etc/mihomo/config.yaml"
 	CUSTOM_OFF=""
+	TEMPLATE_MAP=""
 
 	if [ -f /etc/config/mihomo ]; then
 		config_load mihomo
@@ -142,9 +180,21 @@ load_config() {
 		config_get CONFFILE "main" "conffile" "/etc/mihomo/config.yaml"
 		# 不做自定义组合并的 profile 列表 (LuCI 配置页勾选, 空格分隔)
 		config_get CUSTOM_OFF "main" "custom_groups_off"
+		# 模版绑定: uci list 元素 "<profile>=<tpl-id>" (config_get 把 list
+		# 拼成空格分隔的一行; profile 名与 tpl-id 都不含空格, 可以这样拆)
+		config_get TEMPLATE_MAP "main" "template_map"
 	fi
 
 	SOURCES="$WORKDIR/sources"
+}
+
+# 取某 profile 绑定的模版 id; 没有绑定时返回 1
+template_bound() {
+	local e
+	for e in $TEMPLATE_MAP; do
+		[ "${e%%=*}" = "$1" ] && { echo "${e#*=}"; return 0; }
+	done
+	return 1
 }
 
 # Derive a usable file name from a URL: drop query/fragment, keep the last
@@ -798,6 +848,453 @@ replace_block() {
 	fi
 }
 
+# ---------------------------------------------------------------------------
+# 配置模版 (订阅转换)
+#
+# 模版不是一份可直接运行的配置, 而是「转换目标」的描述:
+#   template-info:   name / desc / adapter (主选择组名, 用于 dns "#组名" 重写)
+#   proxy-groups:    转换后的组; 地区组用 include-all + filter 正则自动收节点
+#   rules:           转换后的规则
+#   rule-providers:  可选; 模版没有时目标配置里的同名段会被移除
+#
+# 转换语义: 服务器 (proxies / proxy-providers) 与 dns / sniffer / tun 等其余
+# 段落原样保留, 上面三段整体替换 —— 手动修改天然不丢。模版来源两处:
+#   /usr/share/mihomo/templates   随包内置 (builtin/)
+#   <workdir>/templates           用户自建 (user/)
+# 每个 profile 可通过 uci mihomo.main.template_map 绑定一个模版
+# (元素 "<profile>=<tpl-id>"), 绑定后订阅更新也走同一条转换管线。
+# ---------------------------------------------------------------------------
+
+# 从模版文件的 template-info 块里取一个字段
+tpl_field() {  # $1=文件 $2=字段名 -> 值 (可能为空)
+	awk -v f="$2" -v topre="$TOPKEY_RE" '
+		/^template-info:[[:space:]]*$/ { inb = 1; next }
+		inb && $0 ~ topre { exit }
+		inb && $0 ~ "^[[:space:]]*" f ":" {
+			sub("^[^:]*:[[:space:]]*", "")
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+			gsub(/^[\047\042]|[\047\042]$/, "")
+			print
+			exit
+		}
+	' "$1"
+}
+
+# 解析模版 id 为文件路径, 结果放进 $TPL。id 形如:
+#   builtin:xxx.yaml / user:xxx.yaml / 裸文件名 (先 user 后 builtin, 用户覆盖优先)
+resolve_tpl() {
+	local id="$1" rest f=""
+	[ -n "$id" ] || die "缺少模版 id"
+
+	rest="${id#*:}"
+	# 防路径穿越: 模版文件名只允许纯文件名
+	case "$rest" in
+		*/*|.*) die "非法模版 id: $id" ;;
+	esac
+
+	case "$id" in
+		builtin:*) f="$TPL_BUILTIN/$rest" ;;
+		user:*)    f="$WORKDIR/templates/$rest" ;;
+		*)
+			if [ -f "$WORKDIR/templates/$rest" ]; then
+				f="$WORKDIR/templates/$rest"
+			elif [ -f "$TPL_BUILTIN/$rest" ]; then
+				f="$TPL_BUILTIN/$rest"
+			fi
+			;;
+	esac
+
+	[ -n "$f" ] && [ -f "$f" ] || die "找不到模版: $id"
+	TPL="$f"
+}
+
+# 把 dns 段里 nameserver 条目的 "#组名" 后缀统一重写为 $2。
+# 模版换了组名而 dns 还指着旧组时, 那些 nameserver 的出站代理就落空了
+# (mihomo 会静默回退直连, 防环语义丢失), 所以转换必须做这一步。
+# 只动 dns 块内 "- <url>#..." 形态的行, 其余行不碰。
+rewrite_dns_adapter() {  # $1=文件 (原地改) $2=组名
+	local t="$1.rewrite.$$"
+	TMPFILES="$TMPFILES $t"
+	awk -v ad="$2" -v topre="$TOPKEY_RE" '
+		!indns && $0 ~ /^dns:[[:space:]]*$/ { indns = 1; print; next }
+		indns && $0 ~ topre { indns = 0; print; next }
+		indns && $0 ~ /^[[:space:]]*-[[:space:]]+.*https?:\/\/.*#/ {
+			sub(/#.*/, "#" ad)
+		}
+		{ print }
+	' "$1" > "$t" && mv -f "$t" "$1" || { rm -f "$t"; die "重写 dns 段组名失败"; }
+}
+
+# 删除文件里的一个顶层块; 没有该块时原样输出
+remove_block() {  # $1=文件 $2=键名 -> stdout
+	local r from to
+	r=$(block_range "$1" "$2")
+	if [ -z "$r" ]; then
+		cat "$1"
+	else
+		from="${r%% *}"
+		to="${r##* }"
+		[ "$from" -gt 1 ] && head -n $((from - 1)) "$1"
+		tail -n +$((to + 1)) "$1"
+	fi
+}
+
+# 转换核心: 把模版的 proxy-groups / rules / rule-providers 三段装进 $1 (原地改)。
+# 模版没有 rule-providers 时, 目标里的 rule-providers 一并移除 (规则已整体替换,
+# 留着只会是死重)。有 adapter 时顺手重写 dns "#组名"。
+# 报告: CV_NOTE(转换了什么) / CV_ADAPTER(dns 组名, 可空)
+convert_profile() {
+	local file="$1" tpl="$2"
+	local pg ru rp out
+
+	pg="/tmp/mihomo-conv.$$.pg"
+	ru="/tmp/mihomo-conv.$$.ru"
+	rp="/tmp/mihomo-conv.$$.rp"
+	out="/tmp/mihomo-conv.$$.out"
+	TMPFILES="$TMPFILES $pg $ru $rp $out"
+
+	extract_block "$tpl" proxy-groups > "$pg" \
+		|| die "模版 $tpl 缺少 proxy-groups 段, 无法转换"
+	extract_block "$tpl" rules > "$ru" \
+		|| die "模版 $tpl 缺少 rules 段, 无法转换"
+
+	CV_ADAPTER="$(tpl_field "$tpl" adapter)"
+
+	replace_block "$file" "$pg" proxy-groups > "$out" \
+		|| die "转换失败: 无法替换 proxy-groups 段"
+	mv -f "$out" "$file"
+
+	replace_block "$file" "$ru" rules > "$out" \
+		|| die "转换失败: 无法替换 rules 段"
+	mv -f "$out" "$file"
+
+	if extract_block "$tpl" rule-providers > "$rp"; then
+		replace_block "$file" "$rp" rule-providers > "$out" \
+			|| die "转换失败: 无法替换 rule-providers 段"
+		mv -f "$out" "$file"
+		CV_NOTE="proxy-groups / rules / rule-providers 已按模版重写"
+	else
+		remove_block "$file" rule-providers > "$out" \
+			|| die "转换失败: 无法移除 rule-providers 段"
+		mv -f "$out" "$file"
+		CV_NOTE="proxy-groups / rules 已按模版重写, 原 rule-providers 已移除 (模版规则不使用它)"
+	fi
+
+	if [ -n "$CV_ADAPTER" ]; then
+		rewrite_dns_adapter "$file" "$CV_ADAPTER"
+	fi
+}
+
+# 列出全部模版: "id<TAB>描述" (builtin = 随包, user = <workdir>/templates/)
+do_template_list() {
+	local d f prefix desc
+	for d in "$TPL_BUILTIN" "$WORKDIR/templates"; do
+		[ -d "$d" ] || continue
+		prefix="builtin"
+		[ "$d" != "$TPL_BUILTIN" ] && prefix="user"
+		for f in "$d"/*.yaml "$d"/*.yml; do
+			[ -f "$f" ] || continue
+			desc="$(tpl_field "$f" desc)"
+			echo "$prefix:$(basename "$f")	${desc:-$(basename "$f")}"
+		done
+	done
+}
+
+do_template_show() {
+	[ -n "$1" ] || die "template show 需要一个模版 id"
+	resolve_tpl "$1"
+	cat "$TPL"
+}
+
+# 把 profile 绑定到模版 (uci mihomo.main.template_map, list 元素 "<profile>=<id>")
+# tplid 为 "-" 时清除绑定。走命令行 uci 而不是 rpcd 的 uci.apply, 避免触发
+# config.change 事件让 mihomo 服务 reload。
+do_template_bind() {
+	local name="$1" tplid="$2" e
+
+	[ -n "$name" ] || die "template bind 需要配置文件名"
+	normalize_name "$name"
+	name="$NAME"
+	[ -n "$tplid" ] || die "template bind 需要模版 id (- 表示清除绑定)"
+
+	# "-" 只表示清除绑定, 不走模版解析
+	[ "$tplid" != "-" ] && resolve_tpl "$tplid"
+
+	command -v uci >/dev/null 2>&1 || die "系统里没有 uci 命令, 无法保存模版绑定"
+	uci -q get "mihomo.main" >/dev/null 2>&1 || die "uci 段 mihomo.main 不存在"
+
+	uci -q delete "mihomo.main.template_map" 2>/dev/null
+	for e in $TEMPLATE_MAP; do
+		[ "${e%%=*}" = "$name" ] && continue
+		uci -q add_list "mihomo.main.template_map=$e"
+	done
+	[ "$tplid" != "-" ] && uci -q add_list "mihomo.main.template_map=$name=$tplid"
+	uci -q commit mihomo || die "写入 /etc/config/mihomo 失败"
+
+	if [ "$tplid" = "-" ]; then
+		echo "已清除 $name 的模版绑定 (订阅更新将保留本地 proxy-groups / rules 原样)"
+	else
+		echo "已把 $name 绑定到模版 $tplid (订阅更新时组与规则按该模版重写)"
+	fi
+	echo "RESULT: bound"
+}
+
+# 应用模版: 对现有 profile 立即执行一次转换 (不动 proxies, 订阅链接不重拉)
+do_template_apply() {
+	local name="$1" tplid="$2"
+	local target tpl cand cand2 localg keptf chk n1 n2 stage mode before after
+
+	[ -n "$name" ] || die "template apply 需要目标配置文件名"
+	[ -n "$tplid" ] || die "template apply 需要模版 id"
+	normalize_name "$name"
+	name="$NAME"
+	resolve_tpl "$tplid"
+
+	target="$WORKDIR/$name"
+	[ -f "$target" ] || die "目标配置不存在: $target"
+
+	cand="/tmp/mihomo-tpl.$$.cand"
+	cand2="/tmp/mihomo-tpl.$$.cand2"
+	localg="/tmp/mihomo-tpl.$$.local"
+	keptf="/tmp/mihomo-tpl.$$.kept"
+	chk="/tmp/mihomo-tpl.$$.check"
+	n1="/tmp/mihomo-tpl.$$.cmp.new"
+	n2="/tmp/mihomo-tpl.$$.cmp.old"
+	stage="/tmp/mihomo-tpl.$$.stage"
+	TMPFILES="$TMPFILES $cand $cand2 $localg $keptf $chk $n1 $n2 $stage"
+
+	cp -f "$target" "$cand" || die "无法读取目标配置: $target"
+
+	echo "== 转换 =="
+	echo "目标:   $target"
+	echo "模版:   $tplid"
+	echo
+	convert_profile "$cand" "$TPL"
+	echo "$CV_NOTE"
+	[ -n "$CV_ADAPTER" ] && echo "dns nameserver \"#组名\" 已重写为: #$CV_ADAPTER"
+
+	case " $CUSTOM_OFF " in
+		*" $name "*)
+			echo "本 profile 已关闭自定义组合并, custom.d 用户组未追加"
+			;;
+		*)
+			if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
+				# localfile 传 custom-groups.yaml 自己: 应用模版的意义就是重写组,
+				# 不把旧 profile 里手写的旧组复活回来; custom.d 用户组照常追加
+				merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
+					"$cand" "$cand2" "$localg" "$keptf" \
+					|| die "应用模版失败: 合并自定义组时出错"
+				cand="$cand2"
+				echo "已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组 (与模版组同名时以模版为准)"
+			fi
+			;;
+	esac
+	# Per-profile 覆写 (overrides/<name>.yaml): 模版与自定义组之后的最后一层,
+	# 用户对单个 profile 的直接定制, 优先级最高。
+	apply_override "$cand" "$name"
+	if [ "$OV_APPLIED" = "1" ]; then
+		echo "$OV_NOTE"
+	fi
+	echo
+
+	before=$(wc -c < "$target" | tr -d ' ')
+	normalize_file "$cand" > "$n1"
+	normalize_file "$target" > "$n2"
+
+	if cmp -s "$n1" "$n2"; then
+		echo "模版转换结果与当前内容一致, 没有需要改动的地方。"
+		echo "RESULT: unchanged"
+		return 0
+	fi
+
+	echo "== 校验 (mihomo -t) =="
+	check_file "$cand" > "$chk" 2>&1
+	rc=$?
+	cat "$chk"
+	echo
+
+	if [ "$rc" -ne 0 ]; then
+		echo "-- 失败原因提示 --"
+		check_hint "$chk"
+		echo
+		die "应用模版失败: 转换结果未通过 mihomo -t 校验 (退出码 $rc), 未修改 $target"
+	fi
+
+	echo "== 写入 =="
+	cp -f "$cand" "$stage" || die "应用模版失败: 写入暂存文件失败 ($stage)"
+
+	mode=$(stat -c '%a' "$target" 2>/dev/null)
+	[ -n "$mode" ] && chmod "$mode" "$stage" 2>/dev/null
+
+	if ! mv -f "$stage" "$target"; then
+		die "应用模版失败: 替换 $target 失败"
+	fi
+
+	after=$(wc -c < "$target" | tr -d ' ')
+	echo "已应用: $target ($before -> $after 字节)"
+	echo
+
+	if [ "$target" != "$CONFFILE" ]; then
+		echo "当前生效的配置是 $CONFFILE, 本次改的不是它, 因此不重启服务。"
+		echo "RESULT: applied"
+		return 0
+	fi
+
+	if [ ! -x "$INITD" ] || ! "$INITD" running >/dev/null 2>&1; then
+		echo "mihomo 服务未运行, 未执行重启 (下次启动时使用新配置)。"
+		echo "RESULT: applied"
+		return 0
+	fi
+
+	echo "== 重启 =="
+	if "$INITD" restart; then
+		echo "已重启 mihomo 服务, 模版配置已生效。"
+		echo "RESULT: applied-restarted"
+	else
+		echo "错误: 配置已应用, 但 mihomo 服务重启失败 (详见上面的输出与系统日志)" >&2
+		echo "RESULT: restart-failed"
+		exit 1
+	fi
+}
+
+# 应用 per-profile 覆写 (Clash Verge 的 Merge 语义)。覆写文件:
+#   <workdir>/overrides/<profile>.yaml —— 存在且非空即生效, 清空即停用。
+# 支持三种顶层键:
+#   <key>:            该段整块替换 (如 dns: / sniffer:)
+#   prepend-<key>:    条目插到该键列表最前 (rules / proxies / proxy-groups ...)
+#   append-<key>:     条目追加到该键列表最后
+# 其余段落不动。覆写在模版转换与自定义组追加之后执行, 是用户对单个 profile
+# 的最终发言权 (优先级最高)。报告: OV_APPLIED / OV_NOTE。
+apply_override() {  # $1=候选文件 (原地改) $2=profile 名
+	local file="$1" name="$2"
+	local ovf="$WORKDIR/overrides/$name.yaml"
+	local ovkeys k key act r from to
+	local tmp out
+
+	OV_APPLIED=0
+	OV_NOTE=""
+	[ -s "$ovf" ] || return 0
+	OV_APPLIED=1
+
+	tmp="/tmp/mihomo-ov.$$.blk"
+	out="/tmp/mihomo-ov.$$.out"
+	TMPFILES="$TMPFILES $tmp $out"
+
+	ovkeys="$(awk -v topre="$TOPKEY_RE" '
+		$0 ~ topre { k = $0; sub(/:.*/, "", k); print k }
+	' "$ovf")"
+
+	[ -n "$ovkeys" ] || { OV_NOTE="覆写文件里没有可识别的顶层键, 已忽略"; return 0; }
+
+	while IFS= read -r k; do
+		[ -n "$k" ] || continue
+		case "$k" in
+			prepend-*) act="prepend"; key="${k#prepend-}" ;;
+			append-*)  act="append";  key="${k#append-}" ;;
+			*)         act="replace"; key="$k" ;;
+		esac
+
+		extract_block "$ovf" "$k" > "$tmp" || continue
+
+		if [ "$act" = "replace" ]; then
+			replace_block "$file" "$tmp" "$key" > "$out" \
+				|| die "覆写失败: 无法替换 $key 段"
+			mv -f "$out" "$file"
+			OV_NOTE="$OV_NOTE$key=替换 "
+			continue
+		fi
+
+		r=$(block_range "$file" "$key")
+		if [ -z "$r" ]; then
+			# 目标没有该段: 以去掉前缀的键名整段追加到文件末尾
+			{
+				cat "$file"
+				[ -n "$(tail -c 1 "$file" 2>/dev/null)" ] && echo
+				printf '%s:\n' "$key"
+				awk 'NR > 1' "$tmp"
+			} > "$out" && mv -f "$out" "$file" \
+				|| die "覆写失败: 无法创建 $key 段"
+			OV_NOTE="$OV_NOTE$key=新建 "
+			continue
+		fi
+
+		from="${r%% *}"
+		to="${r##* }"
+		if [ "$act" = "prepend" ]; then
+			{
+				head -n "$from" "$file"
+				awk 'NR > 1' "$tmp"
+				tail -n +$((from + 1)) "$file"
+			} > "$out" || die "覆写失败: 处理 $key 段时出错"
+		else
+			# append: 追加到该键列表真正的最后 (与 Verge Merge 语义一致;
+			# 注意 rules 若以 MATCH 结尾, 追加在其后的条目不会生效)
+			{
+				head -n "$to" "$file"
+				awk 'NR > 1' "$tmp"
+				tail -n +$((to + 1)) "$file"
+			} > "$out" || die "覆写失败: 处理 $key 段时出错"
+		fi
+		mv -f "$out" "$file"
+		OV_NOTE="$OV_NOTE$key=$act "
+	done <<OvKeys
+$ovkeys
+OvKeys
+
+	OV_NOTE="覆写已生效: ${OV_NOTE% }"
+	return 0
+}
+
+# 保存 per-profile 覆写 (LuCI 页面分块暂存后调用, 与 custom-save 同一模式)。
+# 内容为空 (去注释空白后) 时删除覆写文件 = 停用覆写。
+do_override_save() {
+	local name="$1" src="$2" stage
+	local ovdir ovf
+
+	[ -n "$name" ] || die "override-save 需要配置文件名"
+	[ -n "$src" ] || die "override-save 需要暂存文件路径"
+	normalize_name "$name"
+	name="$NAME"
+
+	ovdir="$WORKDIR/overrides"
+	ovf="$ovdir/$name.yaml"
+
+	# 覆写内容只在暂存副本上校验, 原子落位后才碰工作目录
+	stage="/tmp/mihomo-override.$$.yaml"
+	TMPFILES="$TMPFILES $stage"
+	[ -f "$src" ] || die "暂存文件不存在: $src"
+	cp -f "$src" "$stage" || die "无法读取暂存文件: $src"
+
+	# 空覆写 = 停用
+	if ! grep -qE '^[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*:' "$stage"; then
+		if [ -f "$ovf" ]; then
+			rm -f "$ovf" 2>/dev/null || die "无法删除旧覆写文件 $ovf"
+			echo "覆写内容为空, 已停用 $name 的覆写 (删除 $ovf)"
+		else
+			echo "覆写内容为空, $name 本来就没有覆写"
+		fi
+		echo "RESULT: cleared"
+		return 0
+	fi
+
+	mkdir -p "$ovdir" || die "创建 $ovdir 失败"
+	mv -f "$stage" "$ovf" || die "写入 $ovf 失败"
+	chmod 600 "$ovf" 2>/dev/null
+	echo "已写入 $ovf ($(wc -c < "$ovf" | tr -d ' ') 字节)"
+	echo "RESULT: saved"
+}
+
+do_template() {
+	local op="$1"
+	case "$op" in
+		list)  do_template_list ;;
+		show)  do_template_show "$2" ;;
+		apply) do_template_apply "$2" "$3" ;;
+		bind)  do_template_bind "$2" "$3" ;;
+		*)     die "未知 template 子命令: $op (可用: list / show / apply / bind)" ;;
+	esac
+}
+
 # 归一化后的内容, 只用于比较, 不改写文件本身: 去掉行尾空白、空行与整行注释。
 # 订阅里常见的「更新时间」注释行每次都会有细微差别, 不剔除的话每天都会被判成
 # 「有变化」而白白重启一次代理, 而这些差异对 mihomo 来说没有任何意义。
@@ -888,7 +1385,7 @@ do_import() {
 	echo "已导入: $target"
 
 	if source_set "$name" "$url"; then
-		echo "已记录订阅链接, 之后可用「仅更新服务器和代理组」单独刷新"
+		echo "已记录订阅链接, 之后可用「更新订阅」单独刷新服务器"
 	fi
 
 	if [ "$target" = "$CONFFILE" ]; then
@@ -1008,6 +1505,31 @@ do_remove() {
 	echo "已删除: $target"
 	echo "已清除它记录的订阅链接 (若有)"
 
+	# 覆写文件随 profile 一起删, 免得下次同名导入时旧覆写悄悄生效
+	if [ -f "$WORKDIR/overrides/$name.yaml" ]; then
+		rm -f "$WORKDIR/overrides/$name.yaml" 2>/dev/null \
+			&& echo "已删除它的覆写文件 (overrides/$name.yaml)" \
+			|| echo "注意: 覆写文件 overrides/$name.yaml 删除失败, 请手动清理"
+	fi
+
+	# 模版绑定也一并清掉 (走命令行 uci, 不触发 rpcd reload)
+	if command -v uci >/dev/null 2>&1 && [ -n "$TEMPLATE_MAP" ]; then
+		local e has=0
+		for e in $TEMPLATE_MAP; do
+			[ "${e%%=*}" = "$name" ] && has=1
+		done
+		if [ "$has" = "1" ]; then
+			uci -q delete "mihomo.main.template_map" 2>/dev/null
+			for e in $TEMPLATE_MAP; do
+				[ "${e%%=*}" = "$name" ] && continue
+				uci -q add_list "mihomo.main.template_map=$e" 2>/dev/null
+			done
+			uci -q commit mihomo 2>/dev/null \
+				&& echo "已清除它的模版绑定" \
+				|| echo "注意: 模版绑定清理失败 (uci), 请在页面上重新保存绑定"
+		fi
+	fi
+
 	# 定时更新的目标若是刚删的文件, 下次 cron 一跑就会报「配置文件不存在」。
 	# 只提醒, 不代改 uci: 关闭/改选是页面上的明确动作, 脚本擅自改会掩盖问题。
 	if command -v uci >/dev/null 2>&1; then
@@ -1023,14 +1545,14 @@ do_remove() {
 }
 
 # ---------------------------------------------------------------------------
-# 命令: update  (只替换 proxies / proxy-groups 两段, 其余内容原样保留)
+# 命令: update  (只替换 proxies, 其余内容原样保留; 绑定模版时组与规则按模版重写)
 # ---------------------------------------------------------------------------
 
 do_update() {
 	local name="$1" url="$2" from_record=0
 	local target before after cur stage
-	local dl norm flog newp newg localg mergedg keptf m1 m2 chk rc hints reason
-	local have_p have_g n1 n2 note_p note_g
+	local dl norm flog newp localg mergedg keptf m1 m2 chk rc hints reason
+	local tplid n1 n2 note_p note_g note_c note_ov
 
 	[ -n "$name" ] || die "缺少配置文件名"
 
@@ -1039,13 +1561,13 @@ do_update() {
 
 	target="$WORKDIR/$name"
 
-	[ -f "$target" ] || die "更新 $name 失败: 配置文件不存在 ($target, 仅更新只能作用于已存在的配置)"
+	[ -f "$target" ] || die "更新 $name 失败: 配置文件不存在 ($target, 更新订阅只能作用于已存在的配置)"
 
 	if [ -z "$url" ]; then
 		url="$(source_get "$name")"
 		from_record=1
 		if [ -z "$url" ]; then
-			die "更新 $name 失败: 该配置没有记录订阅链接, 请在「仅更新服务器和代理组」的输入框里填写链接后重试"
+			die "更新 $name 失败: 该配置没有记录订阅链接, 请在「更新订阅」的输入框里填写链接后重试"
 		fi
 	fi
 
@@ -1059,16 +1581,14 @@ do_update() {
 	dl="/tmp/mihomo-update.$$.yaml"
 	flog="/tmp/mihomo-update.$$.log"
 	newp="/tmp/mihomo-update.$$.proxies"
-	newg="/tmp/mihomo-update.$$.groups"
 	localg="/tmp/mihomo-update.$$.local-groups"
 	mergedg="/tmp/mihomo-update.$$.merged-groups"
 	keptf="/tmp/mihomo-update.$$.kept"
 	m1="/tmp/mihomo-update.$$.1"
-	m2="/tmp/mihomo-update.$$.2"
 	chk="/tmp/mihomo-update.$$.check"
 	n1="/tmp/mihomo-update.$$.cmp.new"
 	n2="/tmp/mihomo-update.$$.cmp.old"
-	TMPFILES="$TMPFILES $dl $flog $newp $newg $localg $mergedg $keptf $m1 $m2 $chk $n1 $n2"
+	TMPFILES="$TMPFILES $dl $flog $newp $localg $mergedg $keptf $m1 $chk $n1 $n2"
 
 	before=$(wc -c < "$target" | tr -d ' ')
 
@@ -1101,31 +1621,19 @@ do_update() {
 	echo
 
 	echo "== 提取 (远程配置) =="
-	have_p=0
-	have_g=0
 
-	if extract_block "$dl" proxies > "$newp"; then
-		have_p=1
-		echo "proxies:       $(wc -l < "$newp" | tr -d ' ') 行"
-	else
-		echo "proxies:       未找到"
+	# 新更新语义: 订阅只提供服务器 (proxies)。代理组与规则来自本地文件
+	# (手动修改是权威版本) 或该 profile 绑定的模版 —— 这正是「更新时保留
+	# 手动修改」的实现方式, 与 template apply 共用同一条转换管线。
+	if ! extract_block "$dl" proxies > "$newp"; then
+		die "更新 $name 失败: 远程配置里没有 proxies 段 (可能不是 clash/mihomo 订阅, 或上游只提供 proxy-providers; 后者请用整份导入并自行维护 providers)"
 	fi
 
-	if extract_block "$dl" proxy-groups > "$newg"; then
-		have_g=1
-		echo "proxy-groups:  $(wc -l < "$newg" | tr -d ' ') 行"
-	else
-		echo "proxy-groups:  未找到"
-	fi
-	echo
-
-	if [ "$have_p" = 0 ] && [ "$have_g" = 0 ]; then
-		die "更新 $name 失败: 远程配置里既没有 proxies 也没有 proxy-groups 段 (可能不是 clash/mihomo 订阅, 或订阅内容被上游改写)"
-	fi
-
-	if [ "$have_p" = 1 ] && ! block_has_entries "$newp"; then
+	if ! block_has_entries "$newp"; then
 		die "更新 $name 失败: 远程 proxies 段为空列表, 拒绝用它覆盖本地的服务器列表"
 	fi
+	echo "proxies: $(wc -l < "$newp" | tr -d ' ') 行"
+	echo
 
 	# 先静默算一遍合并结果, 与磁盘上的文件比较之后再决定要不要动它。
 	# 内容一致时连写盘都不做: 文件时间戳不变, 服务也就不会因为「配置文件被
@@ -1133,44 +1641,86 @@ do_update() {
 	cur="$target"
 	note_p=""
 	note_g=""
+	note_c=""
 
-	if [ "$have_p" = 1 ]; then
-		if block_exists "$cur" proxies; then
-			note_p="已用远程内容替换"
-		else
-			note_p="本地原本没有该段, 已追加到文件末尾"
-			if grep -qE '^proxy-providers:' "$cur"; then
-				note_p="$note_p
-               (注意: 本地使用了 proxy-providers, 追加内联 proxies 后两者会同时生效)"
-			fi
-		fi
-		replace_block "$cur" "$newp" proxies > "$m1" || die "更新 $name 失败: 处理 proxies 段时出错"
-		cur="$m1"
+	if block_exists "$cur" proxies; then
+		note_p="已用远程内容替换"
 	else
-		note_p="远程没有该段, 保持本地不变"
+		note_p="本地原本没有该段, 已追加到文件末尾"
+		if grep -qE '^proxy-providers:' "$cur"; then
+			note_p="$note_p
+               (注意: 本地使用了 proxy-providers, 追加内联 proxies 后两者会同时生效)"
+		fi
 	fi
 
-	if [ "$have_g" = 1 ]; then
-		# per-profile 开关: uci mihomo.main.custom_groups_off 列表里的 profile
-		# 不做合并, 完全按订阅原始内容更新; 不在列表则默认启用。
+	replace_block "$cur" "$newp" proxies > "$m1" || die "更新 $name 失败: 处理 proxies 段时出错"
+	cur="$m1"
+
+	# 模版绑定: uci mihomo.main.template_map 里该 profile 的模版。
+	#   绑定了模版 → proxies 来自订阅, 组/规则来自模版 (dns "#组名" 一并修正),
+	#   custom.d 用户组随后追加;
+	#   未绑定     → 组与规则也来自订阅 (订阅组是权威, 与历史行为一致),
+	#   custom.d 用户组照旧合并。手动定制的持久载体是模版绑定与覆写,
+	#   两者都不会被订阅更新冲掉。
+	newg="/tmp/mihomo-update.$$.groups"
+	m2="/tmp/mihomo-update.$$.2"
+	TMPFILES="$TMPFILES $newg $m2"
+	tplid="$(template_bound "$name" || true)"
+	if [ -n "$tplid" ]; then
+		resolve_tpl "$tplid"
+		echo "== 转换 (模版: $tplid) =="
+		convert_profile "$cur" "$TPL"
+		echo "$CV_NOTE"
+		[ -n "$CV_ADAPTER" ] && echo "dns nameserver \"#组名\" 已重写为: #$CV_ADAPTER"
+		note_g="$CV_NOTE"
+
 		case " $CUSTOM_OFF " in
 			*" $name "*)
-				note_g="本 profile 已在 LuCI 勾选关闭自定义组合并, 按订阅原始内容更新"
+				note_c="本 profile 已关闭自定义组合并, 未追加"
 				;;
 			*)
-				merge_local_groups "$target" "$newg" "$mergedg" "$localg" "$keptf" || die "更新 $name 失败: 合并本地自定义组时出错"
-				newg="$mergedg"
-				if block_exists "$cur" proxy-groups; then
-					note_g="已更新订阅组, 并保留 $(cat "$keptf" 2>/dev/null) 个本地自定义组"
+				if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
+					merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
+						"$cur" "$mergedg" "$localg" "$keptf" \
+						|| die "更新 $name 失败: 合并本地自定义组时出错"
+					cur="$mergedg"
+					note_c="已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组"
 				else
-					note_g="本地原本没有该段, 已追加到文件末尾"
+					note_c="custom.d 里没有自定义组"
 				fi
 				;;
 		esac
-		replace_block "$cur" "$newg" proxy-groups > "$m2" || die "更新 $name 失败: 处理 proxy-groups 段时出错"
-		cur="$m2"
 	else
-		note_g="远程没有该段, 保持本地不变"
+		if extract_block "$dl" proxy-groups > "$newg"; then
+			echo "== 提取 (远程 proxy-groups) =="
+			echo "proxy-groups: $(wc -l < "$newg" | tr -d ' ') 行"
+			echo
+			case " $CUSTOM_OFF " in
+				*" $name "*)
+					note_g="本 profile 已在 LuCI 勾选关闭自定义组合并, 按订阅原始内容更新"
+					;;
+				*)
+					merge_local_groups "$target" "$newg" "$mergedg" "$localg" "$keptf" \
+						|| die "更新 $name 失败: 合并本地自定义组时出错"
+					newg="$mergedg"
+					note_g="已用订阅组替换, 并追加 $(cat "$keptf" 2>/dev/null) 个本地自定义组"
+					;;
+			esac
+			replace_block "$cur" "$newg" proxy-groups > "$m2" \
+				|| die "更新 $name 失败: 处理 proxy-groups 段时出错"
+			cur="$m2"
+		else
+			note_g="远程没有 proxy-groups 段, 保持本地不变"
+		fi
+	fi
+
+	# Per-profile 覆写 (overrides/<name>.yaml): 无论有没有模版都生效 —— 这是
+	# 用户对单个 profile 的最后一层定制, 优先级高于模版与自定义组。
+	note_ov=""
+	apply_override "$cur" "$name"
+	if [ "$OV_APPLIED" = "1" ]; then
+		note_ov="$OV_NOTE"
+		echo "$OV_NOTE"
 	fi
 
 	echo "== 对比 =="
@@ -1178,21 +1728,23 @@ do_update() {
 	normalize_file "$target" > "$n2"
 
 	if cmp -s "$n1" "$n2"; then
-		echo "远程的 proxies / proxy-groups 与本地一致, 没有新内容。"
+		echo "远程的 proxies 与本地一致, 没有新内容。"
 		echo "未改动 $target, 也不会重启服务。"
 		echo
 		echo "RESULT: unchanged"
 
 		if [ "$from_record" = 0 ]; then
 			source_set "$name" "$url" \
-				&& echo "已记录本次使用的订阅链接, 下次可直接点「仅更新」无需再填写"
+				&& echo "已记录本次使用的订阅链接, 下次可直接点「更新订阅」无需再填写"
 		fi
 		return 0
 	fi
 
-	echo "有内容变化, 将替换下面这两段 (其余内容原样保留):"
+	echo "有内容变化, 将做下面这些改动 (其余段落原样保留):"
 	echo "proxies:       $note_p"
-	echo "proxy-groups:  $note_g"
+	echo "组与规则:      $note_g"
+	[ -n "$note_c" ] && echo "自定义组:      $note_c"
+	[ -n "$note_ov" ] && echo "覆写:          $note_ov"
 	echo
 
 	echo "== 校验 (mihomo -t) =="
@@ -1224,12 +1776,14 @@ do_update() {
 	after=$(wc -c < "$target" | tr -d ' ')
 
 	echo "已更新: $target ($before -> $after 字节)"
-	echo "其他段落 (rules / dns / tun 等) 未做任何改动"
+	echo "组与规则: $note_g"
+	[ -n "$note_c" ] && echo "自定义组: $note_c"
+	[ -n "$note_ov" ] && echo "覆写: $note_ov"
 	echo
 
 	if [ "$from_record" = 0 ]; then
 		if source_set "$name" "$url"; then
-			echo "已记录本次使用的订阅链接, 下次可直接点「仅更新」无需再填写"
+			echo "已记录本次使用的订阅链接, 下次可直接点「更新订阅」无需再填写"
 		fi
 	fi
 
@@ -1309,6 +1863,14 @@ case "$cmd" in
 	update)
 		load_config
 		do_update "$1" "$2"
+		;;
+	template)
+		load_config
+		do_template "$1" "$2" "$3"
+		;;
+	override-save)
+		load_config
+		do_override_save "$1" "$2"
 		;;
 	custom-save)
 		do_custom_save "$1"
