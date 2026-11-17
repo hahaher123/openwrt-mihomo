@@ -15,7 +15,7 @@ template-info:
 proxy-groups:
     - name: 🚀 节点选择
       type: select
-      proxies: [♻️ 自动选择, 🎬 流媒体, 🤖 AI 服务, DIRECT]
+      proxies: [♻️ 自动选择, DIRECT]
       include-all: true
       exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
     - name: ♻️ 自动选择
