@@ -99,7 +99,7 @@ Usage: $0 import <url> [name] [force]
                   dns, manual edits) stays local: it is the authoritative
                   version. When the profile is bound to a template (see below)
                   proxy-groups / rules / rule-providers are rewritten from that
-                  template first, then custom groups are appended.
+                  template first.
           url     subscription URL; when omitted the URL recorded for that
                   profile (see <workdir>/sources) is used
 
@@ -122,14 +122,6 @@ Usage: $0 import <url> [name] [force]
   section, replaces those blocks, and rewrites the dns nameserver "#group"
   suffixes to the template's adapter group so the DNS egress stays pinned.
 
-  custom-save stage
-                  install a staged file (/tmp/mihomo-config-upload.*) as
-                  <workdir>/custom.d/custom-groups.yaml. That file holds
-                  the user's own proxy groups; after a template conversion
-                  ("update" of a bound profile or "template apply") they are
-                  appended to the converted groups, same-name template groups
-                  win.
-
   override-save <name> <stage>
                   install a staged file (/tmp/...) as
                   <workdir>/overrides/<name>.yaml — the per-profile override
@@ -137,7 +129,7 @@ Usage: $0 import <url> [name] [force]
                   that whole block; "prepend-<key>" / "append-<key>" insert
                   items at the front / back of that list. The override is the
                   last layer applied by both "update" and "template apply",
-                  above templates and custom groups. An empty staged file
+                  above templates. An empty staged file
                   clears (disables) the override.
 
   override-apply <name>
@@ -636,195 +628,6 @@ extract_block() {
 	sed -n "${from},${to}p" "$file"
 }
 
-# ---------------------------------------------------------------------------
-# 自定义代理组
-#
-# 统一入口: $WORKDIR/custom.d/custom-groups.yaml。放在子目录是为了不进
-# LuCI 配置文件列表(列表只收 workdir 顶层的 *.yaml)。用户把自定义组(任意
-# 类型)写在里面, 对所有 profile 的订阅更新生效, 不随 update 丢失, 换订阅
-# 也不用重写。文件内容就是一段 proxy-groups 块:
-#   proxy-groups:
-#     - { name: 自动测速, type: url-test, proxies: [香港, 东京, 新加坡, 美国],
-#         url: 'http://www.gstatic.com/generate_204', interval: 1800, tolerance: 50 }
-#
-# update 时的合并规则(merge_local_groups):
-#   1. 组源 = custom-groups.yaml (权威) + 旧 profile 里已手写的组(向后兼容,
-#      同名时 custom-groups.yaml 优先; 用户把组挪进统一文件后旧写法自然失效);
-#   2. 按组名判重, 远程已有的组以远程为准;
-#   3. 本地独有的组追加到 proxy-groups 段末尾;
-#   4. 组名自动补进远程各 select 组的 proxies 列表(流式 [a, b] 与块式逐行均
-#      支持), 保留「在手动选择组里挑自定义组」的入口。
-# 组切分规则: 列表项以缩进 + "- " 开头, 同级项缩进相同; 更深缩进的 "- x"
-# (块式 proxies 子项)、续行、空行、注释都归属当前组, 避免把子项误切成组。
-# 本地组引用的子组/节点若在远程已改名, 合并结果过不了 mihomo -t, 更新会
-# 中止并提示 — 硬失败优于静默丢组。
-# ---------------------------------------------------------------------------
-
-merge_local_groups() {
-	local localfile="$1" remotefile="$2" outfile="$3" groups="$4" keptf="$5"
-	local custom="$WORKDIR/custom.d/custom-groups.yaml"
-	: > "$groups"
-	[ -s "$custom" ] && cat "$custom" >> "$groups"
-	if block_exists "$localfile" proxy-groups; then
-		extract_block "$localfile" proxy-groups >> "$groups"
-	fi
-	[ -s "$groups" ] || { cp "$remotefile" "$outfile"; echo 0 > "$keptf"; return 0; }
-	awk -v localgroups="$groups" -v keptf="$keptf" -v topre="$TOPKEY_RE" '
-		function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-		function value1(line, key,   t) {
-			t = line
-			if (t !~ key "[[:space:]]*:") return ""
-			sub("^.*" key "[[:space:]]*:[[:space:]]*", "", t)
-			sub(/[,}].*$/, "", t)
-			gsub(/[\047\042]/, "", t)
-			return trim(t)
-		}
-		function field(block, key,   L, n, i, v) {
-			n = split(block, L, "\n")
-			for (i = 1; i <= n; i++) { v = value1(L[i], key); if (v != "") return v }
-			return ""
-		}
-		function last_close(line,   pos, p) {
-			pos = 0
-			for (;;) {
-				p = index(substr(line, pos + 1), "]")
-				if (p == 0) break
-				pos += p
-			}
-			return pos
-		}
-		# 对一个远程 select 组块补入缺失的本地组名; 返回补好的块
-		function treat(block,   L, n, i, i2, k, typ, nm, res, newline, t, collecting, lastitem, ins_ind, p, plist, inj, covered, q1, q2, c3) {
-			typ = field(block, "type")
-			if (typ != "select" || cnt == 0) return block
-			nm = field(block, "name")
-			n = split(block, L, "\n")
-			# 流式内联: proxies: [ ... ] (可能还有后续键, 在最后一个 ] 前插入)
-			for (i = 1; i <= n; i++) {
-				if (L[i] ~ /proxies:[[:space:]]*\[/ && (p = last_close(L[i])) > 0) {
-					plist = substr(L[i], index(L[i], "[") + 1, p - index(L[i], "[") - 1)
-					inj = ""
-					for (k = 1; k <= cnt; k++) {
-						# Never add a select group to its own proxy list; in legacy profile
-						# mode the local source also contains the remote select group.
-						if (names[k] == nm) continue
-						q1 = "\047" names[k] "\047"; q2 = "\042" names[k] "\042"; c3 = "," names[k] ","
-						covered = index(L[i], q1) != 0 || index(L[i], q2) != 0 || index(plist, c3) != 0 || index("," plist ",", c3) != 0
-						if (!covered) inj = inj (inj == "" ? "" : ", ") "\047" names[k] "\047"
-					}
-					if (inj == "") return block
-					newline = substr(L[i], 1, p - 1) ", " inj "]" substr(L[i], p + 1)
-					return join_ins(L, n, i, newline)
-				}
-			}
-			# 块式: proxies: 逐行列表, 在最后一个子项后按同缩进追加
-			collecting = 0; lastitem = 0; ins_ind = "  "
-			for (i = 1; i <= n; i++) {
-				if (collecting) {
-					if (L[i] ~ /^[[:space:]]+-[[:space:]]/) {
-						lastitem = i
-						match(L[i], /^[[:space:]]*/)
-						ins_ind = substr(L[i], 1, RLENGTH)
-						continue
-					}
-					if (L[i] ~ /^[[:space:]]*$/ || L[i] ~ /^[[:space:]]*#/) continue
-					break
-				}
-				if (L[i] ~ /^[[:space:]]*proxies:[[:space:]]*$/) collecting = 1
-			}
-			if (collecting && lastitem > 0) {
-				inj = ""
-				for (k = 1; k <= cnt; k++) {
-					if (names[k] == nm) continue
-					covered = 0
-					for (i2 = 1; i2 <= n; i2++) {
-						if (index(L[i2], "\047" names[k] "\047") != 0 || index(L[i2], "\042" names[k] "\042") != 0) { covered = 1; break }
-						if (L[i2] ~ /^[[:space:]]+-[[:space:]]/) {
-							t = substr(L[i2], RLENGTH + 1)
-							gsub(/[\047\042]/, "", t)
-							sub(/[[:space:]]+$/, "", t)
-							if (t == names[k]) { covered = 1; break }
-						}
-					}
-					if (!covered) inj = inj (inj == "" ? "" : " ") ins_ind "- \047" names[k] "\047\n"
-				}
-				if (inj == "") return block
-				res = ""
-				for (i = 1; i <= n; i++) {
-					res = res L[i] "\n"
-					if (i == lastitem) { res = res inj; i = n + 1; break }
-				}
-				return res
-			}
-			return block
-		}
-		function join_ins(L, n, at, newline,   i, res) {
-			res = ""
-			for (i = 1; i <= n; i++) {
-				res = res (i == at ? newline : L[i]) (i < n ? "\n" : "")
-			}
-			return res
-		}
-		function flush_group() {
-			if (cur == "") return
-			nm = field(cur, "name")
-			if (nm != "") for (k = 1; k <= cnt; k++) if (nm == names[k]) found[k] = 1
-			print treat(cur)
-			cur = ""
-		}
-		function dump_kept(   k) {
-			if (kept_done) return
-			kept_done = 1
-			for (k = 1; k <= cnt; k++) if (!found[k]) { print blocks[k]; kept_cnt++ }
-			printf "%d\n", kept_cnt > keptf
-		}
-		# 收集团块; 同名先到先得(custom-groups.yaml 先载, 权威优先)
-		function ldpush(   nm) {
-			if (ld == "") return
-			nm = field(ld, "name")
-			if (nm == "") nm = "\001" (++anon)
-			if (!seen[nm]) { seen[nm] = 1; cnt++; blocks[cnt] = ld; names[cnt] = nm; found[cnt] = 0 }
-			ld = ""
-		}
-		BEGIN {
-			cnt = 0; kept_cnt = 0; kept_done = 0; anon = 0
-			while ((getline line < localgroups) > 0) {
-				if (line ~ /^[[:space:]]*proxy-groups:[[:space:]]*$/) continue
-				# 顶层键用 TOPKEY_RE 判定: 顶格的 "- name: ..." 是列表条目, 不是键
-				if (line ~ topre) { ldpush(); continue }
-				if (line ~ /^[[:space:]]*$/ || line ~ /^[[:space:]]*#/) {
-					if (ld != "") ld = ld "\n" line
-					continue
-				}
-				match(line, /^[[:space:]]*/)
-				l2 = RLENGTH
-				if (ld == "") { ld = line; ind2 = l2; continue }
-				if (l2 > ind2) { ld = ld "\n" line; continue }
-				ldpush(); ld = line; ind2 = l2
-			}
-			ldpush()
-			close(localgroups)
-		}
-		/^proxy-groups:[[:space:]]*$/ { flush_group(); in_groups = 1; print; next }
-		in_groups && $0 ~ topre { flush_group(); dump_kept(); in_groups = 0; print; next }
-		in_groups {
-			if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) {
-				if (cur != "") cur = cur "\n" $0; else print
-				next
-			}
-			match($0, /^[[:space:]]*/)
-			l = RLENGTH
-			if (cur == "") { cur = $0; ind = l; next }
-			if (l > ind) { cur = cur "\n" $0; next }
-			flush_group(); cur = $0; ind = l
-			next
-		}
-		{ print }
-		END { flush_group(); dump_kept() }
-	' "$remotefile" > "$outfile"
-	[ -s "$keptf" ] || echo 0 > "$keptf"
-}
-
 # 判断一个块文件里是否真的有条目 (空列表 proxies: [] 视为空)
 block_has_entries() {
 	grep -qE '^[[:space:]]*-[[:space:]]*[^[:space:]]' "$1" && return 0
@@ -1069,7 +872,7 @@ do_template_bind() {
 # 应用模版: 对现有 profile 立即执行一次转换 (不动 proxies, 订阅链接不重拉)
 do_template_apply() {
 	local name="$1" tplid="$2"
-	local target tpl cand cand2 localg keptf chk n1 n2 stage mode before after
+	local target tpl cand chk n1 n2 stage mode before after
 
 	[ -n "$name" ] || die "template apply 需要目标配置文件名"
 	[ -n "$tplid" ] || die "template apply 需要模版 id"
@@ -1081,14 +884,11 @@ do_template_apply() {
 	[ -f "$target" ] || die "目标配置不存在: $target"
 
 	cand="/tmp/mihomo-tpl.$$.cand"
-	cand2="/tmp/mihomo-tpl.$$.cand2"
-	localg="/tmp/mihomo-tpl.$$.local"
-	keptf="/tmp/mihomo-tpl.$$.kept"
 	chk="/tmp/mihomo-tpl.$$.check"
 	n1="/tmp/mihomo-tpl.$$.cmp.new"
 	n2="/tmp/mihomo-tpl.$$.cmp.old"
 	stage="/tmp/mihomo-tpl.$$.stage"
-	TMPFILES="$TMPFILES $cand $cand2 $localg $keptf $chk $n1 $n2 $stage"
+	TMPFILES="$TMPFILES $cand $chk $n1 $n2 $stage"
 
 	cp -f "$target" "$cand" || die "无法读取目标配置: $target"
 
@@ -1100,16 +900,7 @@ do_template_apply() {
 	echo "$CV_NOTE"
 	[ -n "$CV_ADAPTER" ] && echo "dns nameserver \"#组名\" 已重写为: #$CV_ADAPTER"
 
-	if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
-		# localfile 传 custom-groups.yaml 自己: 应用模版的意义就是重写组,
-		# 不把旧 profile 里手写的旧组复活回来; custom.d 用户组照常追加
-		merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
-			"$cand" "$cand2" "$localg" "$keptf" \
-			|| die "应用模版失败: 合并自定义组时出错"
-		cand="$cand2"
-		echo "已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组 (与模版组同名时以模版为准)"
-	fi
-	# Per-profile 覆写 (overrides/<name>.yaml): 模版与自定义组之后的最后一层,
+	# Per-profile 覆写 (overrides/<name>.yaml): 模版之后的最后一层,
 	# 用户对单个 profile 的直接定制, 优先级最高。
 	apply_override "$cand" "$name"
 	if [ "$OV_APPLIED" = "1" ]; then
@@ -1275,7 +1066,7 @@ do_override_apply() {
 #   <key>:            该段整块替换 (如 dns: / sniffer:)
 #   prepend-<key>:    条目插到该键列表最前 (rules / proxies / proxy-groups ...)
 #   append-<key>:     条目追加到该键列表最后
-# 其余段落不动。覆写在模版转换与自定义组追加之后执行, 是用户对单个 profile
+# 其余段落不动。覆写在模版转换之后执行, 是用户对单个 profile
 # 的最终发言权 (优先级最高)。报告: OV_APPLIED / OV_NOTE。
 apply_override() {  # $1=候选文件 (原地改) $2=profile 名
 	local file="$1" name="$2"
@@ -1407,7 +1198,7 @@ OvKeys
 	return 0
 }
 
-# 保存 per-profile 覆写 (LuCI 页面分块暂存后调用, 与 custom-save 同一模式)。
+# 保存 per-profile 覆写 (LuCI 页面分块暂存后调用)。
 # 内容为空 (去注释空白后) 时删除覆写文件 = 停用覆写。
 do_override_save() {
 	local name="$1" src="$2" stage
@@ -1713,8 +1504,8 @@ do_remove() {
 do_update() {
 	local name="$1" url="$2" from_record=0
 	local target before after cur stage
-	local dl norm flog newp localg mergedg keptf m1 m2 chk rc hints reason
-	local tplid n1 n2 note_p note_g note_c note_ov
+	local dl norm flog newp m1 m2 chk rc hints reason
+	local tplid n1 n2 note_p note_g note_ov
 
 	[ -n "$name" ] || die "缺少配置文件名"
 
@@ -1743,14 +1534,11 @@ do_update() {
 	dl="/tmp/mihomo-update.$$.yaml"
 	flog="/tmp/mihomo-update.$$.log"
 	newp="/tmp/mihomo-update.$$.proxies"
-	localg="/tmp/mihomo-update.$$.local-groups"
-	mergedg="/tmp/mihomo-update.$$.merged-groups"
-	keptf="/tmp/mihomo-update.$$.kept"
 	m1="/tmp/mihomo-update.$$.1"
 	chk="/tmp/mihomo-update.$$.check"
 	n1="/tmp/mihomo-update.$$.cmp.new"
 	n2="/tmp/mihomo-update.$$.cmp.old"
-	TMPFILES="$TMPFILES $dl $flog $newp $localg $mergedg $keptf $m1 $chk $n1 $n2"
+	TMPFILES="$TMPFILES $dl $flog $newp $m1 $chk $n1 $n2"
 
 	before=$(wc -c < "$target" | tr -d ' ')
 
@@ -1803,7 +1591,6 @@ do_update() {
 	cur="$target"
 	note_p=""
 	note_g=""
-	note_c=""
 
 	if block_exists "$cur" proxies; then
 		note_p="已用远程内容替换"
@@ -1819,11 +1606,9 @@ do_update() {
 	cur="$m1"
 
 	# 模版绑定: uci mihomo.main.template_map 里该 profile 的模版。
-	#   绑定了模版 → proxies 来自订阅, 组/规则来自模版 (dns "#组名" 一并修正),
-	#   custom.d 用户组随后追加;
-	#   未绑定     → 组与规则也来自订阅 (订阅组是权威, 与历史行为一致),
-	#   custom.d 用户组照旧合并。手动定制的持久载体是模版绑定与覆写,
-	#   两者都不会被订阅更新冲掉。
+	#   绑定了模版 → proxies 来自订阅, 组/规则来自模版 (dns "#组名" 一并修正);
+	#   未绑定     → 组与规则也来自订阅 (订阅组是权威, 与历史行为一致)。
+	#   手动定制的持久载体是模版绑定与覆写, 两者都不会被订阅更新冲掉。
 	newg="/tmp/mihomo-update.$$.groups"
 	m2="/tmp/mihomo-update.$$.2"
 	TMPFILES="$TMPFILES $newg $m2"
@@ -1835,25 +1620,12 @@ do_update() {
 		echo "$CV_NOTE"
 		[ -n "$CV_ADAPTER" ] && echo "dns nameserver \"#组名\" 已重写为: #$CV_ADAPTER"
 		note_g="$CV_NOTE"
-
-		if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
-			merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
-				"$cur" "$mergedg" "$localg" "$keptf" \
-				|| die "更新 $name 失败: 合并本地自定义组时出错"
-			cur="$mergedg"
-			note_c="已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组"
-		else
-			note_c="custom.d 里没有自定义组"
-		fi
 	else
 		if extract_block "$dl" proxy-groups > "$newg"; then
 			echo "== 提取 (远程 proxy-groups) =="
 			echo "proxy-groups: $(wc -l < "$newg" | tr -d ' ') 行"
 			echo
-			merge_local_groups "$target" "$newg" "$mergedg" "$localg" "$keptf" \
-				|| die "更新 $name 失败: 合并本地自定义组时出错"
-			newg="$mergedg"
-			note_g="已用订阅组替换, 并追加 $(cat "$keptf" 2>/dev/null) 个本地自定义组"
+			note_g="已用订阅组替换"
 			replace_block "$cur" "$newg" proxy-groups > "$m2" \
 				|| die "更新 $name 失败: 处理 proxy-groups 段时出错"
 			cur="$m2"
@@ -1863,7 +1635,7 @@ do_update() {
 	fi
 
 	# Per-profile 覆写 (overrides/<name>.yaml): 无论有没有模版都生效 —— 这是
-	# 用户对单个 profile 的最后一层定制, 优先级高于模版与自定义组。
+	# 用户对单个 profile 的最后一层定制, 优先级高于模版。
 	note_ov=""
 	apply_override "$cur" "$name"
 	if [ "$OV_APPLIED" = "1" ]; then
@@ -1891,7 +1663,6 @@ do_update() {
 	echo "有内容变化, 将做下面这些改动 (其余段落原样保留):"
 	echo "proxies:       $note_p"
 	echo "组与规则:      $note_g"
-	[ -n "$note_c" ] && echo "自定义组:      $note_c"
 	[ -n "$note_ov" ] && echo "覆写:          $note_ov"
 	echo
 
@@ -1925,7 +1696,6 @@ do_update() {
 
 	echo "已更新: $target ($before -> $after 字节)"
 	echo "组与规则: $note_g"
-	[ -n "$note_c" ] && echo "自定义组: $note_c"
 	[ -n "$note_ov" ] && echo "覆写: $note_ov"
 	echo
 
@@ -1968,34 +1738,6 @@ do_update() {
 	fi
 }
 
-# ---------------------------------------------------------------------------
-# 命令: custom-save  (把 LuCI「自定义代理组」编辑区提交的暂存文件落位)
-# ---------------------------------------------------------------------------
-
-do_custom_save() {
-	local stage="$1"
-
-	load_config
-
-	case "$stage" in
-		/tmp/mihomo-config-upload.*) ;;
-		*)
-			die "custom-save 只接受 /tmp/mihomo-config-upload.* 暂存文件"
-			;;
-	esac
-
-	[ -f "$stage" ] || die "暂存文件不存在: $stage"
-
-	grep -qE '^[[:space:]]*proxy-groups:' "$stage" \
-		|| die "内容缺少 proxy-groups: 键行: custom-groups.yaml 必须以 proxy-groups: 块为主体 (允许注释)"
-
-	mkdir -p "$WORKDIR/custom.d" || die "创建 $WORKDIR/custom.d 失败"
-	mv -f "$stage" "$WORKDIR/custom.d/custom-groups.yaml" || die "写入 $WORKDIR/custom.d/custom-groups.yaml 失败"
-	chmod 600 "$WORKDIR/custom.d/custom-groups.yaml" 2>/dev/null
-	echo "已写入 $WORKDIR/custom.d/custom-groups.yaml ($(wc -c < "$WORKDIR/custom.d/custom-groups.yaml" | tr -d ' ') 字节)"
-	echo "RESULT: saved"
-}
-
 cmd="$1"
 [ $# -gt 0 ] && shift
 
@@ -2023,9 +1765,6 @@ case "$cmd" in
 	override-apply)
 		load_config
 		do_override_apply "$1"
-		;;
-	custom-save)
-		do_custom_save "$1"
 		;;
 	remove)
 		load_config

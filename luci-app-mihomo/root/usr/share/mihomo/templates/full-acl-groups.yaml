@@ -1,0 +1,117 @@
+# =====================================================================
+# mihomo 配置模版 —— 完整分流 (ACL4SSR 增强风格)
+# =====================================================================
+# 转换规则与 classic-groups.yaml 相同 (见该文件头注释)。区别只在分组
+# 更全: 在地区组之上叠加流媒体 / AI 服务 / Telegram / 游戏平台 /
+# 微软服务 / 苹果服务 / 广告拦截 / 漏网之鱼 等业务组, 规则按业务
+# 精细分流。规则仍为 GEOSITE / GEOIP 内联, 无外部 ruleset 依赖。
+# 参考: ACL4SSR (blackmatrix7) 与社区主流分流方案的组结构。
+# =====================================================================
+template-info:
+  name: 完整分流 (ACL4SSR 增强)
+  desc: 地区组 + 流媒体/AI/Telegram/游戏/微软/苹果/广告/漏网之鱼业务组; GEOSITE/GEOIP 内联规则
+  adapter: 🚀 节点选择
+
+proxy-groups:
+    - name: 🚀 节点选择
+      type: select
+      proxies: [♻️ 自动选择, 🎬 国外媒体, 🤖 AI 服务, 📲 Telegram, 🎮 游戏平台, 🪟 微软服务, 🍎 苹果服务, 🐟 漏网之鱼, DIRECT]
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: ♻️ 自动选择
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: 🎬 国外媒体
+      type: select
+      proxies: [🚀 节点选择, ♻️ 自动选择, 🇭🇰 香港, 🇹🇼 台湾, 🇯🇵 日本, 🇰🇷 韩国, 🇸🇬 新加坡, 🇺🇸 美国, 🌍 其它地区]
+    - name: 🤖 AI 服务
+      type: select
+      proxies: [🚀 节点选择, ♻️ 自动选择, 🇭🇰 香港, 🇹🇼 台湾, 🇯🇵 日本, 🇰🇷 韩国, 🇸🇬 新加坡, 🇺🇸 美国]
+    - name: 📲 Telegram
+      type: select
+      proxies: [🚀 节点选择, ♻️ 自动选择, 🇭🇰 香港, 🇹🇼 台湾, 🇯🇵 日本, 🇰🇷 韩国, 🇸🇬 新加坡, 🇺🇸 美国]
+    - name: 🎮 游戏平台
+      type: select
+      proxies: [🚀 节点选择, ♻️ 自动选择, 🇭🇰 香港, 🇹🇼 台湾, 🇯🇵 日本, 🇰🇷 韩国, 🇸🇬 新加坡, 🇺🇸 美国, DIRECT]
+    - name: 🪟 微软服务
+      type: select
+      proxies: [DIRECT, 🚀 节点选择, ♻️ 自动选择]
+    - name: 🍎 苹果服务
+      type: select
+      proxies: [DIRECT, 🚀 节点选择, ♻️ 自动选择]
+    - name: 🛑 广告拦截
+      type: select
+      proxies: [REJECT, DIRECT]
+    - name: 🐟 漏网之鱼
+      type: select
+      proxies: [🚀 节点选择, ♻️ 自动选择, DIRECT]
+    - name: 🇭🇰 香港
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)香港|港|hk|hong ?kong|🇭🇰"
+    - name: 🇹🇼 台湾
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)台湾|臺灣|台|新北|彰化|tw|taiwan|🇹🇼"
+    - name: 🇯🇵 日本
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)日本|东京|大阪|埼玉|川日|泉日|沪日|深日|jp|japan|🇯🇵"
+    - name: 🇰🇷 韩国
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)韩国|韓國|首尔|首爾|韩|kr|korea|🇰🇷"
+    - name: 🇸🇬 新加坡
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)新加坡|狮城|獅城|坡|sg|singapore|🇸🇬"
+    - name: 🇺🇸 美国
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)美国|美|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|凤凰城|费利蒙|拉斯维加斯|波特兰|达拉斯|俄勒冈|硅谷|us|united ?states|🇺🇸"
+    - name: 🌍 其它地区
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium|香港|港|hk|hong ?kong|🇭🇰|台湾|臺灣|台|新北|彰化|tw|taiwan|🇹🇼|日本|东京|大阪|埼玉|川日|泉日|沪日|深日|jp|japan|🇯🇵|韩国|韓國|首尔|首爾|韩|kr|korea|🇰🇷|新加坡|狮城|獅城|坡|sg|singapore|🇸🇬|美国|美|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|凤凰城|费利蒙|拉斯维加斯|波特兰|达拉斯|俄勒冈|硅谷|us|united ?states|🇺🇸"
+
+rules:
+    - GEOSITE,private,DIRECT
+    - GEOSITE,category-ads-all,🛑 广告拦截
+    - GEOSITE,category-ai-!cn,🤖 AI 服务
+    - GEOSITE,youtube,🎬 国外媒体
+    - GEOSITE,netflix,🎬 国外媒体
+    - GEOSITE,disney,🎬 国外媒体
+    - GEOSITE,spotify,🎬 国外媒体
+    - GEOSITE,telegram,📲 Telegram
+    - GEOSITE,category-games,🎮 游戏平台
+    - GEOSITE,microsoft,🪟 微软服务
+    - GEOSITE,apple,🍎 苹果服务
+    - GEOSITE,cn,DIRECT
+    - GEOIP,private,DIRECT,no-resolve
+    - GEOIP,CN,DIRECT
+    - MATCH,🐟 漏网之鱼

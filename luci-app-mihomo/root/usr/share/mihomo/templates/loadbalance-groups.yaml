@@ -1,0 +1,41 @@
+# =====================================================================
+# mihomo 配置模版 —— 负载均衡
+# =====================================================================
+# 转换规则与 classic-groups.yaml 相同 (见该文件头注释)。区别在于主出口
+# 是 load-balance 组: 多条节点按策略分摊流量, 单节点带宽不足或多线
+# 叠加时使用。strategy 默认 consistent-hashing (同目标走同节点, 会话
+# 不跳); 想纯轮询可改成 round-robin。GEOSITE/GEOIP 内联规则。
+# =====================================================================
+template-info:
+  name: 负载均衡
+  desc: load-balance 多节点分摊 (consistent-hashing) + 自动测速兜底; GEOSITE/GEOIP 最短规则
+  adapter: 🚀 节点选择
+
+proxy-groups:
+    - name: 🚀 节点选择
+      type: select
+      proxies: [🔀 负载均衡, ♻️ 自动选择, DIRECT]
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: 🔀 负载均衡
+      type: load-balance
+      strategy: consistent-hashing
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: ♻️ 自动选择
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+
+rules:
+    - GEOSITE,private,DIRECT
+    - GEOSITE,category-ads-all,REJECT
+    - GEOSITE,cn,DIRECT
+    - GEOIP,private,DIRECT,no-resolve
+    - GEOIP,CN,DIRECT
+    - MATCH,🚀 节点选择

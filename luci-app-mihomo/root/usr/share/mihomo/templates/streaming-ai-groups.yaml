@@ -1,0 +1,81 @@
+# =====================================================================
+# mihomo 配置模版 —— 流媒体与 AI 分流
+# =====================================================================
+# 转换规则与 classic-groups.yaml 相同 (见该文件头注释)。中等分组数:
+# 在地区组之上只叠加「流媒体」与「AI 服务」两个业务组, 适合只想把
+# Netflix / YouTube / Disney+ / Spotify 与 ChatGPT / Claude 等分流
+# 到指定地区节点, 其余流量走主组的场景。GEOSITE/GEOIP 内联规则。
+# 参考: 社区主流流媒体解锁 / AI 归属地分流方案的组结构。
+# =====================================================================
+template-info:
+  name: 流媒体与 AI 分流
+  desc: 地区组 + 流媒体 + AI 服务两个业务组; YouTube/Netflix/Disney+/Spotify 与 AI 服务定向, GEOSITE/GEOIP 内联规则
+  adapter: 🚀 节点选择
+
+proxy-groups:
+    - name: 🚀 节点选择
+      type: select
+      proxies: [♻️ 自动选择, 🎬 流媒体, 🤖 AI 服务, DIRECT]
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: ♻️ 自动选择
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      exclude-filter: "(?i)剩余|流量|到期|过期|官网|推广|套餐|重置|expire|Traffic|Premium"
+    - name: 🎬 流媒体
+      type: select
+      proxies: [🚀 节点选择, ♻️ 自动选择, 🇭🇰 香港, 🇹🇼 台湾, 🇯🇵 日本, 🇸🇬 新加坡, 🇺🇸 美国]
+    - name: 🤖 AI 服务
+      type: select
+      proxies: [🚀 节点选择, ♻️ 自动选择, 🇭🇰 香港, 🇹🇼 台湾, 🇯🇵 日本, 🇸🇬 新加坡, 🇺🇸 美国]
+    - name: 🇭🇰 香港
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)香港|港|hk|hong ?kong|🇭🇰"
+    - name: 🇹🇼 台湾
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)台湾|臺灣|台|新北|彰化|tw|taiwan|🇹🇼"
+    - name: 🇯🇵 日本
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)日本|东京|大阪|埼玉|川日|泉日|沪日|深日|jp|japan|🇯🇵"
+    - name: 🇸🇬 新加坡
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)新加坡|狮城|獅城|坡|sg|singapore|🇸🇬"
+    - name: 🇺🇸 美国
+      type: url-test
+      url: http://www.gstatic.com/generate_204
+      interval: 300
+      tolerance: 50
+      include-all: true
+      filter: "(?i)美国|美|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|凤凰城|费利蒙|拉斯维加斯|波特兰|达拉斯|俄勒冈|硅谷|us|united ?states|🇺🇸"
+
+rules:
+    - GEOSITE,private,DIRECT
+    - GEOSITE,category-ads-all,REJECT
+    - GEOSITE,category-ai-!cn,🤖 AI 服务
+    - GEOSITE,youtube,🎬 流媒体
+    - GEOSITE,netflix,🎬 流媒体
+    - GEOSITE,disney,🎬 流媒体
+    - GEOSITE,spotify,🎬 流媒体
+    - GEOSITE,cn,DIRECT
+    - GEOIP,private,DIRECT,no-resolve
+    - GEOIP,CN,DIRECT
+    - MATCH,🚀 节点选择

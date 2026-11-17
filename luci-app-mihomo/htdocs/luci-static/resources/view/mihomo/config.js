@@ -27,7 +27,7 @@
 //   更新订阅都走同一条转换 (由 config.sh template apply/bind 完成)
 // - 配置覆写 (Clash Verge Merge 风格): 每个配置文件一份独立覆写文件
 //   <workdir>/overrides/<配置名>.yaml, <键> 整段替换 / prepend-<键> /
-//   append-<键> 增删列表条目; 在模版与自定义组之后执行, 优先级最高
+//   append-<键> 增删列表条目; 在模版之后执行, 优先级最高
 //   (由 config.sh override-save 保存)
 // - 直接编辑选中的配置文件: 校验 / 保存 / 保存并重启
 //   保存与保存并重启都会先校验, 校验不通过不写文件
@@ -554,7 +554,7 @@ return view.extend({
 	// 模版 = 订阅转换的「转换目标」: 保留服务器, 重写 proxy-groups / rules。
 	// 每个配置文件可绑定一份 (uci mihomo.main.template_map), 绑定后更新订阅
 	// 也走同一条转换; 另有 per-profile 覆写文件 (overrides/<配置名>.yaml),
-	// 在模版与自定义组之后执行, 优先级最高。
+	// 在模版之后执行, 优先级最高。
 
 	tplProfSel: function() {
 		return this._tplProfSel ? this._tplProfSel.value : '';
@@ -748,13 +748,13 @@ return view.extend({
 	},
 
 	OVERRIDE_TEMPLATE:
-		'# 覆写: 只对上面选中的配置文件生效, 在模版与自定义组之后执行 (优先级最高)。\n' +
+		'# 覆写: 只对上面选中的配置文件生效, 在模版之后执行 (优先级最高)。\n' +
 		'# <键>:            该段整块替换 (如 dns:)\n' +
 		'# prepend-<键>:    条目插到该键列表最前 (rules / proxies / proxy-groups …)\n' +
 		'# append-<键>:     条目追加到该键列表最后\n' +
 		'# 注意: rules 若以 MATCH 结尾, append 进来的规则在其后不会生效, 请用 prepend。\n' +
 		'# 留空保存 = 停用覆写。最终结果仍会过 mihomo -t 校验, 不通过不落盘。\n' +
-		'append-rules:\n' +
+		'prepend-rules:\n' +
 		'  - DOMAIN-SUFFIX,example.org,DIRECT\n',
 
 	loadOverrideContent: function() {
@@ -1841,9 +1841,9 @@ return view.extend({
 
 			E('h3', {}, [ _('更新订阅') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('按订阅链接重新拉取服务器节点 (proxies)。订阅只提供 proxies, 其余段落以本地为准: 绑定了模版的配置会走模版转换 (见上方「模版与覆写」), 未绑定模版的配置沿用订阅自带的 proxy-groups 并追加 custom.d 自定义组 (需手工维护 <workdir>/custom.d/custom-groups.yaml)。最后应用该配置的覆写文件。'),
+				_('按订阅链接重新拉取服务器节点 (proxies)。订阅只提供 proxies, 其余段落以本地为准: 绑定了模版的配置会走模版转换 (见上方「模版与覆写」), 未绑定模版的配置沿用订阅自带的 proxy-groups。最后应用该配置的覆写文件。'),
 				E('br'),
-				_('流程: 下载 → 提取 proxies → 生成组与规则 (模版转换或订阅组替换) → 追加自定义组 → 应用覆写 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。'),
+				_('流程: 下载 → 提取 proxies → 生成组与规则 (模版转换或订阅组替换) → 应用覆写 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。'),
 				E('br'),
 				_('生成内容与本地一致时不会写盘, 也不会重启服务; 只有内容确实变了才写入并重启 (仅当更新的正是当前生效的配置、且服务正在运行时)。')
 			]),
@@ -1855,7 +1855,7 @@ return view.extend({
 
 			E('h3', {}, [ _('定时更新订阅') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('启用后会写入一条计划任务 (cron), 按设定的频率对选中的配置文件执行与「更新订阅」完全相同的流程: 下载订阅 → 只提取 proxies → 生成组与规则 (绑模版走转换, 未绑沿用订阅组) → 追加自定义组 → 应用覆写 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。'),
+				_('启用后会写入一条计划任务 (cron), 按设定的频率对选中的配置文件执行与「更新订阅」完全相同的流程: 下载订阅 → 只提取 proxies → 生成组与规则 (绑模版走转换, 未绑沿用订阅组) → 应用覆写 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。'),
 				E('br'),
 				_('内容与本地一致时什么都不做 (既不写盘也不重启); 内容有变化时更新配置并重启服务, 让新服务器立即生效。其余设置不会被改动; 每次结果与失败原因写入系统日志 (logread, 标签 mihomo-autoupdate)。'),
 				E('br'),
