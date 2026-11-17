@@ -450,10 +450,6 @@ return view.extend({
 		var self = this;
 		var c = this.cfg();
 
-		// profile 增删后同步刷新「合并开关」清单 (custom-groups.yaml 与本页共用同一份目录列表)
-		if (this.customOffBox)
-			this.buildCustomOffList(entries || []);
-
 		// 同步刷新「模版与覆写」的目标下拉 (与配置文件清单同源)
 		if (this._tplProfSel)
 			this.buildTplProfiles(entries || []);
@@ -551,65 +547,6 @@ return view.extend({
 			cmeditor.setValue(self.ta, '');
 			self.setResult('err', _('读取 %s 失败').format(self.pathOf(name)), String(e.message || e));
 		});
-	},
-
-	// ---------------- 自定义代理组 ----------------
-
-	customPath: function() {
-		// 放子目录: 配置文件列表只收 workdir 顶层的 *.yaml, 子目录不会
-		// 被当成 profile, 避免扰乱正常配置文件列表。
-		return this.cfg().workdir + '/custom.d/custom-groups.yaml';
-	},
-
-	CUSTOM_TEMPLATE:
-		'# 自定义代理组: 对所有配置文件的「更新订阅」生效, 按组名判重, 订阅已有的组以订阅为准。\n' +
-		'# 必须以 proxy-groups: 块为主体。\n' +
-		'proxy-groups:\n' +
-		"    - { name: 自动测速, type: url-test, proxies: [香港, 东京, 新加坡, 美国], url: 'http://www.gstatic.com/generate_204', interval: 1800, tolerance: 50 }\n",
-
-	loadCustomContent: function() {
-		var self = this;
-
-		return L.resolveDefault(fs.read(this.customPath()), '').then(function(text) {
-			cmeditor.setValue(self.customTa, text || self.CUSTOM_TEMPLATE);
-		}, function() {
-			// 文件还不存在: 给一份可直接改的模板
-			cmeditor.setValue(self.customTa, self.CUSTOM_TEMPLATE);
-		});
-	},
-
-	handleCustomSave: function(ev) {
-		var self = this;
-		var content = cmeditor.getValue(this.customTa) || '';
-
-		if (content.indexOf('proxy-groups:') < 0) {
-			this.setResult('warn',
-				_('内容缺少 proxy-groups: 键行'),
-				_('custom-groups.yaml 必须以 proxy-groups: 块为主体 (允许注释)。'));
-			return;
-		}
-
-		var stage = '/tmp/mihomo-config-upload.custom-groups.' + Date.now() + '.yaml';
-
-		this.setResult('info', _('正在保存自定义组…'), '', true);
-
-		return this.writeChunked(stage, content, this.progressReporter(_('正在保存自定义组…')))
-			.then(function(result) {
-				if (!result || result.ok === false)
-					throw { message: (result && result.message) || '?' };
-
-				return fs.exec(HELPER, [ 'custom-save', stage ]);
-			})
-			.then(function(res) {
-				var ok = (res && res.code == 0);
-				var out = joinOutput(res);
-
-				self.setResult(ok ? 'ok' : 'err',
-					ok ? _('自定义组已保存') : _('保存失败 (退出码 %s)').format(res ? res.code : '?'),
-					out || _('(无输出)'));
-			}, function(e) {
-				self.setResult('err', _('保存自定义组失败'), String((e && e.message) || e));
-			});
 	},
 
 	// ---------------- 模版与覆写 ----------------
@@ -869,61 +806,35 @@ return view.extend({
 			});
 	},
 
-	// 每个配置文件一行勾选: 勾选 = 更新时合并自定义组 (默认);
-	// 不勾选的名单写进 uci mihomo.main.custom_groups_off (list)。
-	buildCustomOffList: function(entries) {
-		var off = uci.get('mihomo', 'main', 'custom_groups_off') || [];
-		var names = this.sortedNames(entries);
+	// 立即应用覆写: 不拉订阅、不做模版转换, 直接对目标配置执行一次覆写
+	// (本地配置没有「更新订阅」入口, 这是覆写生效的主路径)。
+	handleOverrideApply: function(ev) {
+		var self = this;
+		var name = this.tplProfSel();
 
-		this._offBoxes = [];
-
-		while (this.customOffBox.firstChild)
-			this.customOffBox.removeChild(this.customOffBox.firstChild);
-
-		if (!names.length) {
-			this.customOffBox.appendChild(E('div', {
-				'style': 'color:#888; font-size:0.92em;'
-			}, [ _('目录下还没有配置文件。') ]));
+		if (!name) {
+			this.setResult('warn', _('请先选择目标配置文件'), '');
 			return;
 		}
 
-		for (var i = 0; i < names.length; i++) {
-			var name = names[i].name;
-			var box = E('input', {
-				'type': 'checkbox',
-				'checked': (off.indexOf(name) < 0) ? '' : null
+		this.setResult('info', _('正在应用覆写…'), '', true);
+
+		return fs.exec(HELPER, [ 'override-apply', name ])
+			.then(function(res) {
+				var ok = (res && res.code == 0);
+				var out = joinOutput(res);
+
+				if (ok && out.indexOf('RESULT: applied-restarted') >= 0)
+					self.setResult('ok', _('覆写已应用并重启服务'), out + self.restartNote());
+				else if (ok && out.indexOf('RESULT: unchanged') >= 0)
+					self.setResult('ok', _('覆写结果与当前内容一致, 无需改动'), out);
+				else if (ok)
+					self.setResult('ok', _('覆写已应用'), out + self.restartNote());
+				else
+					self.setResult('err', _('应用覆写失败 (退出码 %s)').format(res ? res.code : '?'), out || _('(无输出)'));
+			}, function(e) {
+				self.setResult('err', _('应用覆写失败'), String((e && e.message) || e));
 			});
-
-			this._offBoxes.push({ name: name, box: box });
-
-			this.customOffBox.appendChild(E('label', {
-				'style': 'display:inline-flex; align-items:center; gap:6px; padding:6px 12px; margin:0 10px 6px 0; border:1px solid #e2e2e2; border-radius:6px; background:#fff; cursor:pointer;'
-			}, [
-				box,
-				E('span', { 'style': 'font-family:monospace;' }, [ name ])
-			]));
-		}
-	},
-
-	handleCustomOffSave: function(ev) {
-		var self = this;
-		var off = [];
-		var boxes = this._offBoxes || [];
-
-		for (var i = 0; i < boxes.length; i++)
-			if (!boxes[i].box.checked)
-				off.push(boxes[i].name);
-
-		uci.set('mihomo', 'main', 'custom_groups_off', off);
-
-		return uci.save().then(function() {
-			return uci.apply();
-		}).then(function() {
-			self.setResult('ok', _('合并开关已保存'),
-				off.length ? _('不对以下配置合并自定义组: %s').format(off.join(', ')) : _('所有配置文件均启用合并。'));
-		}, function(e) {
-			self.setResult('err', _('保存合并开关失败'), String(e.message || e));
-		});
 	},
 
 	// ---------------- 动作: 远程导入 ----------------
@@ -1758,15 +1669,6 @@ return view.extend({
 			'style': 'width:100%; padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; font-family:monospace;'
 		}, []);
 
-		// ---- 自定义代理组 (custom-groups.yaml) ----
-		this.customTa = E('textarea', {
-			'rows': 12,
-			'spellcheck': 'false',
-			'style': 'width:100%; font-family:monospace; white-space:pre; padding:8px; border:1px solid #e2e2e2; border-radius:6px; background:#f6f6f6;'
-		}, []);
-
-		this.customOffBox = E('div', {}, []);
-
 		// ---- 模版与覆写 ----
 		this._tplProfSel = E('select', {
 			'style': 'padding:7px 8px; border:1px solid #e2e2e2; border-radius:6px; background:#fff; font-family:monospace; min-width:180px;',
@@ -1907,11 +1809,14 @@ return view.extend({
 			this._tplPreview,
 
 			E('div', { 'style': 'margin:14px 0 6px 0; color:#555;' }, [
-				_('覆写 (只对上面选中的配置文件生效; 留空保存即停用):')
+				_('覆写 (只对上面选中的配置文件生效; 留空保存即停用):'),
+				E('br'),
+				_('保存后点「应用覆写」立即生效 (不拉订阅、不做模版转换, 直接改写该配置; 改的是当前生效配置且服务运行中会自动重启)。订阅配置在「更新订阅」时也会自动应用覆写。')
 			]),
 			this.ovTa,
 			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin:10px 0;' }, [
-				btn(_('保存覆写'), 'handleOverrideSave', 'cbi-button')
+				btn(_('保存覆写'), 'handleOverrideSave', 'cbi-button'),
+				btn(_('应用覆写'), 'handleOverrideApply', 'cbi-button cbi-button-positive')
 			]),
 
 			E('h3', {}, [ _('上传本地配置文件') ]),
@@ -1936,7 +1841,7 @@ return view.extend({
 
 			E('h3', {}, [ _('更新订阅') ]),
 			E('div', { 'class': 'cbi-map-descr' }, [
-				_('按订阅链接重新拉取服务器节点 (proxies)。订阅只提供 proxies, 其余段落以本地为准: 绑定了模版的配置会走模版转换 (见上方「模版与覆写」), 未绑定模版的配置沿用订阅自带的 proxy-groups 并追加自定义组 (见下方「自定义代理组」, 勾选开关里关闭合并的 profile 除外)。最后应用该配置的覆写文件。'),
+				_('按订阅链接重新拉取服务器节点 (proxies)。订阅只提供 proxies, 其余段落以本地为准: 绑定了模版的配置会走模版转换 (见上方「模版与覆写」), 未绑定模版的配置沿用订阅自带的 proxy-groups 并追加 custom.d 自定义组 (需手工维护 <workdir>/custom.d/custom-groups.yaml)。最后应用该配置的覆写文件。'),
 				E('br'),
 				_('流程: 下载 → 提取 proxies → 生成组与规则 (模版转换或订阅组替换) → 追加自定义组 → 应用覆写 → 与本地对比 → mihomo -t 校验 → 通过才写回文件。任何一步失败都不会改动原文件, 并给出失败原因 (网络 / DNS 解析 / HTTP 状态 / 配置解析 / 校验不通过)。'),
 				E('br'),
@@ -1946,29 +1851,6 @@ return view.extend({
 			E('div', { 'style': 'margin:10px 0 6px 0;' }, [ this.updUrl ]),
 			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px;' }, [
 				btn(_('更新'), 'handleUpdateCfg')
-			]),
-
-			E('h3', {}, [ _('自定义代理组 (订阅更新时保留)') ]),
-			E('div', { 'class': 'cbi-map-descr' }, [
-				_('写在下面的自定义组 (任意类型) 保存在 %s, 对所有配置文件的「更新订阅」生效, 不随订阅更新丢失, 换订阅也不用重写。未绑定模版的配置更新时按组名判重: 订阅已有的组以订阅为准, 自定义组追加到订阅组后, 组名自动补进订阅各 select 组供手动选择; 绑定模版的配置会先按模版生成组, 再追加自定义组。').format(c.workdir + '/custom.d/custom-groups.yaml'),
-				E('br'),
-				_('文件必须是 proxy-groups: 块, 例如:')
-			]),
-			E('pre', { 'style': 'margin:6px 0; padding:8px 10px; background:rgba(0,0,0,0.04); border-radius:6px; font-size:0.88em; overflow:auto;' }, [
-				"proxy-groups:\n    - { name: 自动测速, type: url-test, proxies: [香港, 东京, 新加坡, 美国], url: 'http://www.gstatic.com/generate_204', interval: 1800, tolerance: 50 }"
-			]),
-			this.customTa,
-			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 18px 0;' }, [
-				btn(_('保存自定义组'), 'handleCustomSave')
-			]),
-
-			E('h3', {}, [ _('自定义组合并开关 (按配置文件)') ]),
-			E('div', { 'class': 'cbi-map-descr' }, [
-				_('勾选 = 更新该配置文件时追加自定义组 (默认); 取消勾选 = 该配置不加自定义组 (绑定模版的配置仍会按模版转换)。开关保存在 uci mihomo.main.custom_groups_off。')
-			]),
-			E('div', { 'style': 'margin:10px 0;' }, [ this.customOffBox ]),
-			E('div', { 'style': 'display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px;' }, [
-				btn(_('保存合并开关'), 'handleCustomOffSave', 'cbi-button')
 			]),
 
 			E('h3', {}, [ _('定时更新订阅') ]),
@@ -2037,7 +1919,6 @@ return view.extend({
 		this.refreshAutoStatus();
 		this.applyRestartSettings();
 		this.refreshRestartStatus();
-		this.loadCustomContent();
 		this.loadTemplates();
 
 		if (data.error)
@@ -2047,7 +1928,7 @@ return view.extend({
 		// 光标上下滑动。资源加载失败时 attach 直接返回 null, 保持原生 textarea。
 		cmeditor.load().then(function() {
 			cmeditor.defer(self.ta, { mode: 'text/x-yaml' });
-			cmeditor.defer(self.customTa, { mode: 'text/x-yaml' });
+			cmeditor.defer(self.ovTa, { mode: 'text/x-yaml' });
 		});
 
 		return root;

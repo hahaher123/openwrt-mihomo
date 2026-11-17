@@ -128,8 +128,7 @@ Usage: $0 import <url> [name] [force]
                   the user's own proxy groups; after a template conversion
                   ("update" of a bound profile or "template apply") they are
                   appended to the converted groups, same-name template groups
-                  win. Profiles listed in the uci list
-                  mihomo.main.custom_groups_off are skipped.
+                  win.
 
   override-save <name> <stage>
                   install a staged file (/tmp/...) as
@@ -140,6 +139,14 @@ Usage: $0 import <url> [name] [force]
                   last layer applied by both "update" and "template apply",
                   above templates and custom groups. An empty staged file
                   clears (disables) the override.
+
+  override-apply <name>
+                  apply the per-profile override to an existing profile right
+                  now (no subscription fetch, no template conversion). This
+                  is the entry point for local profiles that have no
+                  subscription link; subscription profiles already get the
+                  override applied by "update". If the target is the active
+                  conffile and the service is running, it restarts.
 
   remove  name    profile to delete from the work directory. The currently
                   selected config (uci mihomo.main.conffile) is refused; its
@@ -171,15 +178,12 @@ die() {
 load_config() {
 	WORKDIR="/etc/mihomo"
 	CONFFILE="/etc/mihomo/config.yaml"
-	CUSTOM_OFF=""
 	TEMPLATE_MAP=""
 
 	if [ -f /etc/config/mihomo ]; then
 		config_load mihomo
 		config_get WORKDIR "main" "workdir" "/etc/mihomo"
 		config_get CONFFILE "main" "conffile" "/etc/mihomo/config.yaml"
-		# 不做自定义组合并的 profile 列表 (LuCI 配置页勾选, 空格分隔)
-		config_get CUSTOM_OFF "main" "custom_groups_off"
 		# 模版绑定: uci list 元素 "<profile>=<tpl-id>" (config_get 把 list
 		# 拼成空格分隔的一行; profile 名与 tpl-id 都不含空格, 可以这样拆)
 		config_get TEMPLATE_MAP "main" "template_map"
@@ -1096,22 +1100,15 @@ do_template_apply() {
 	echo "$CV_NOTE"
 	[ -n "$CV_ADAPTER" ] && echo "dns nameserver \"#组名\" 已重写为: #$CV_ADAPTER"
 
-	case " $CUSTOM_OFF " in
-		*" $name "*)
-			echo "本 profile 已关闭自定义组合并, custom.d 用户组未追加"
-			;;
-		*)
-			if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
-				# localfile 传 custom-groups.yaml 自己: 应用模版的意义就是重写组,
-				# 不把旧 profile 里手写的旧组复活回来; custom.d 用户组照常追加
-				merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
-					"$cand" "$cand2" "$localg" "$keptf" \
-					|| die "应用模版失败: 合并自定义组时出错"
-				cand="$cand2"
-				echo "已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组 (与模版组同名时以模版为准)"
-			fi
-			;;
-	esac
+	if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
+		# localfile 传 custom-groups.yaml 自己: 应用模版的意义就是重写组,
+		# 不把旧 profile 里手写的旧组复活回来; custom.d 用户组照常追加
+		merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
+			"$cand" "$cand2" "$localg" "$keptf" \
+			|| die "应用模版失败: 合并自定义组时出错"
+		cand="$cand2"
+		echo "已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组 (与模版组同名时以模版为准)"
+	fi
 	# Per-profile 覆写 (overrides/<name>.yaml): 模版与自定义组之后的最后一层,
 	# 用户对单个 profile 的直接定制, 优先级最高。
 	apply_override "$cand" "$name"
@@ -1172,6 +1169,98 @@ do_template_apply() {
 	echo "== 重启 =="
 	if "$INITD" restart; then
 		echo "已重启 mihomo 服务, 模版配置已生效。"
+		echo "RESULT: applied-restarted"
+	else
+		echo "错误: 配置已应用, 但 mihomo 服务重启失败 (详见上面的输出与系统日志)" >&2
+		echo "RESULT: restart-failed"
+		exit 1
+	fi
+}
+
+# 立即应用覆写: 对现有 profile 直接执行一次覆写 (不拉订阅、不做模版转换、
+# 不动其它段落)。这是本地配置 (无订阅链接、未绑模版) 让覆写生效的入口;
+# 订阅配置在「更新订阅」时也会自动应用覆写, 无需单独执行。
+do_override_apply() {
+	local name="$1"
+	local target cand chk n1 n2 stage before after
+
+	[ -n "$name" ] || die "override-apply 需要目标配置文件名"
+	normalize_name "$name"
+	name="$NAME"
+
+	target="$WORKDIR/$name"
+	[ -f "$target" ] || die "目标配置不存在: $target"
+	[ -s "$WORKDIR/overrides/$name.yaml" ] \
+		|| die "没有覆写文件: $WORKDIR/overrides/$name.yaml (先在页面编辑并保存覆写)"
+
+	cand="/tmp/mihomo-ovap.$$.cand"
+	chk="/tmp/mihomo-ovap.$$.check"
+	n1="/tmp/mihomo-ovap.$$.cmp.new"
+	n2="/tmp/mihomo-ovap.$$.cmp.old"
+	stage="/tmp/mihomo-ovap.$$.stage"
+	TMPFILES="$TMPFILES $cand $chk $n1 $n2 $stage"
+
+	cp -f "$target" "$cand" || die "无法读取目标配置: $target"
+
+	echo "== 应用覆写 =="
+	echo "目标:   $target"
+	echo
+	apply_override "$cand" "$name"
+	echo "$OV_NOTE"
+	echo
+
+	before=$(wc -c < "$target" | tr -d ' ')
+	normalize_file "$cand" > "$n1"
+	normalize_file "$target" > "$n2"
+
+	if cmp -s "$n1" "$n2"; then
+		echo "覆写结果与当前内容一致, 没有需要改动的地方。"
+		echo "RESULT: unchanged"
+		return 0
+	fi
+
+	echo "== 校验 (mihomo -t) =="
+	check_file "$cand" > "$chk" 2>&1
+	rc=$?
+	cat "$chk"
+	echo
+
+	if [ "$rc" -ne 0 ]; then
+		echo "-- 失败原因提示 --"
+		check_hint "$chk"
+		echo
+		die "应用覆写失败: 结果未通过 mihomo -t 校验 (退出码 $rc), 未修改 $target"
+	fi
+
+	echo "== 写入 =="
+	cp -f "$cand" "$stage" || die "应用覆写失败: 写入暂存文件失败 ($stage)"
+
+	mode=$(stat -c '%a' "$target" 2>/dev/null)
+	[ -n "$mode" ] && chmod "$mode" "$stage" 2>/dev/null
+
+	if ! mv -f "$stage" "$target"; then
+		die "应用覆写失败: 替换 $target 失败"
+	fi
+
+	after=$(wc -c < "$target" | tr -d ' ')
+	echo "已应用: $target ($before -> $after 字节)"
+	echo
+
+	if [ "$target" != "$CONFFILE" ]; then
+		echo "当前生效的配置是 $CONFFILE, 本次改的不是它, 因此不重启服务。"
+		echo "RESULT: applied"
+		return 0
+	fi
+
+	if [ ! -x "$INITD" ] || ! "$INITD" running >/dev/null 2>&1; then
+		echo "mihomo 服务未运行, 未执行重启 (下次启动时使用新配置)。"
+		echo "RESULT: applied"
+		return 0
+	fi
+
+	echo "== 重启 =="
+	if "$INITD" restart; then
+		echo "已重启 mihomo 服务, 覆写已生效。"
 		echo "RESULT: applied-restarted"
 	else
 		echo "错误: 配置已应用, 但 mihomo 服务重启失败 (详见上面的输出与系统日志)" >&2
@@ -1243,6 +1332,56 @@ apply_override() {  # $1=候选文件 (原地改) $2=profile 名
 
 		from="${r%% *}"
 		to="${r##* }"
+
+		# 幂等去重 + 缩进重排 (一次 awk 完成):
+		# - 覆写是对当前文件的增量, 不去重的话重复执行 override-apply / update
+		#   会把同一批条目追加两份 (模版转换天然幂等, 覆写不是) —— 目标块里
+		#   已有同内容条目 (忽略缩进差异) 时跳过, 全部已存在则本层无改动。
+		# - 目标块列表项缩进 (如 4 空格) 与覆写片段 (如 2 空格) 不一致时,
+		#   同级序列缩进不同会让 YAML 解析直接报错 (设备实测: "did not find
+		#   expected key") —— 以目标块内首个 "- " 行的缩进为准整体平移。
+		tindent=$(sed -n "${from},${to}p" "$file" | awk '
+			/^[[:space:]]*-[[:space:]]/ {
+				s = $0; n = 0
+				while (substr(s, 1, 1) == " ") { n++; s = substr(s, 2) }
+				print n; exit
+			}')
+		findent=$(awk 'NR > 1 && $0 !~ /^[[:space:]]*$/ {
+				s = $0; n = 0
+				while (substr(s, 1, 1) == " ") { n++; s = substr(s, 2) }
+				if (min == "" || n < min) min = n
+			} END { print (min == "" ? 0 : min) }' "$tmp")
+		blk_norm=$(sed -n "${from},${to}p" "$file" | sed 's/^[[:space:]]*//')
+		awk -v blk="$blk_norm" -v t="$tindent" -v f="$findent" '
+			NR == 1 { print; next }
+			$0 ~ /^[[:space:]]*$/ { next }
+			$0 ~ /^[[:space:]]*#/ { next }
+			{
+				s = $0
+				sub(/^[[:space:]]+/, "", s)
+				if (index("\n" blk "\n", "\n" s "\n")) { skip = 1; next }
+				if (t != "" && f != t) {
+					n = 0
+					while (n < f && substr(s, 1, 1) == " ") { n++; s = substr(s, 2) }
+					pad = ""
+					for (i = 0; i < t; i++) pad = pad " "
+					s = pad s
+				}
+				print s
+			}
+			END { if (skip) exit 3 }
+		' "$tmp" > "$tmp.new"; rc2=$?
+		case $rc2 in
+			0|3) ;;
+			*) die "覆写失败: 预处理 $key 段时出错" ;;
+		esac
+		TMPFILES="$TMPFILES $tmp.new"
+		if [ "$(wc -l < "$tmp.new" | tr -d ' ')" -le 1 ]; then
+			OV_NOTE="$OV_NOTE$key=条目已在目标中,跳过 "
+			continue
+		fi
+		tmp="$tmp.new"
+
 		if [ "$act" = "prepend" ]; then
 			{
 				head -n "$from" "$file"
@@ -1697,38 +1836,24 @@ do_update() {
 		[ -n "$CV_ADAPTER" ] && echo "dns nameserver \"#组名\" 已重写为: #$CV_ADAPTER"
 		note_g="$CV_NOTE"
 
-		case " $CUSTOM_OFF " in
-			*" $name "*)
-				note_c="本 profile 已关闭自定义组合并, 未追加"
-				;;
-			*)
-				if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
-					merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
-						"$cur" "$mergedg" "$localg" "$keptf" \
-						|| die "更新 $name 失败: 合并本地自定义组时出错"
-					cur="$mergedg"
-					note_c="已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组"
-				else
-					note_c="custom.d 里没有自定义组"
-				fi
-				;;
-		esac
+		if [ -s "$WORKDIR/custom.d/custom-groups.yaml" ]; then
+			merge_local_groups "$WORKDIR/custom.d/custom-groups.yaml" \
+				"$cur" "$mergedg" "$localg" "$keptf" \
+				|| die "更新 $name 失败: 合并本地自定义组时出错"
+			cur="$mergedg"
+			note_c="已追加 custom.d 里 $(cat "$keptf" 2>/dev/null) 个自定义组"
+		else
+			note_c="custom.d 里没有自定义组"
+		fi
 	else
 		if extract_block "$dl" proxy-groups > "$newg"; then
 			echo "== 提取 (远程 proxy-groups) =="
 			echo "proxy-groups: $(wc -l < "$newg" | tr -d ' ') 行"
 			echo
-			case " $CUSTOM_OFF " in
-				*" $name "*)
-					note_g="本 profile 已在 LuCI 勾选关闭自定义组合并, 按订阅原始内容更新"
-					;;
-				*)
-					merge_local_groups "$target" "$newg" "$mergedg" "$localg" "$keptf" \
-						|| die "更新 $name 失败: 合并本地自定义组时出错"
-					newg="$mergedg"
-					note_g="已用订阅组替换, 并追加 $(cat "$keptf" 2>/dev/null) 个本地自定义组"
-					;;
-			esac
+			merge_local_groups "$target" "$newg" "$mergedg" "$localg" "$keptf" \
+				|| die "更新 $name 失败: 合并本地自定义组时出错"
+			newg="$mergedg"
+			note_g="已用订阅组替换, 并追加 $(cat "$keptf" 2>/dev/null) 个本地自定义组"
 			replace_block "$cur" "$newg" proxy-groups > "$m2" \
 				|| die "更新 $name 失败: 处理 proxy-groups 段时出错"
 			cur="$m2"
@@ -1894,6 +2019,10 @@ case "$cmd" in
 	override-save)
 		load_config
 		do_override_save "$1" "$2"
+		;;
+	override-apply)
+		load_config
+		do_override_apply "$1"
 		;;
 	custom-save)
 		do_custom_save "$1"
