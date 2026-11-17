@@ -911,15 +911,38 @@ resolve_tpl() {
 # 把 dns 段里 nameserver 条目的 "#组名" 后缀统一重写为 $2。
 # 模版换了组名而 dns 还指着旧组时, 那些 nameserver 的出站代理就落空了
 # (mihomo 会静默回退直连, 防环语义丢失), 所以转换必须做这一步。
-# 只动 dns 块内 "- <url>#..." 形态的行, 其余行不碰。
+# 覆盖两种形态: "- 'https://...#组名'" 列表项与 nameserver: ["...#组名", ...]
+# 内联流式写法。组名片段止于收尾引号 (引号保留, 设备实测: 整段 sub 会把收尾
+# 引号一起吃掉造成未闭合引号, YAML 直接解析失败) 或行尾; "# 注释" (紧跟空格)
+# 不动。URL 无引号时行为等同旧的整段替换。
 rewrite_dns_adapter() {  # $1=文件 (原地改) $2=组名
 	local t="$1.rewrite.$$"
 	TMPFILES="$TMPFILES $t"
 	awk -v ad="$2" -v topre="$TOPKEY_RE" '
 		!indns && $0 ~ /^dns:[[:space:]]*$/ { indns = 1; print; next }
 		indns && $0 ~ topre { indns = 0; print; next }
-		indns && $0 ~ /^[[:space:]]*-[[:space:]]+.*https?:\/\/.*#/ {
-			sub(/#.*/, "#" ad)
+		indns {
+			trim = $0
+			sub(/^[[:space:]]+/, "", trim)
+			if (trim !~ /^#/ && trim ~ /https?:\/\// && index(trim, "#") &&
+			    (trim ~ /^-/ || trim ~ /nameserver/)) {
+				line = $0; out = ""
+				while ((p = index(line, "#")) > 0) {
+					rest = substr(line, p + 1)
+					out = out substr(line, 1, p)
+					line = rest
+					if (substr(line, 1, 1) == " ")
+						continue          # "# 注释" 保留
+					q = index(line, "\x27"); w = index(line, "\"")
+					if (q > 0 && (w == 0 || q < w))
+						line = ad substr(line, q)
+					else if (w > 0)
+						line = ad substr(line, w)
+					else
+						line = ad
+				}
+				$0 = out line
+			}
 		}
 		{ print }
 	' "$1" > "$t" && mv -f "$t" "$1" || { rm -f "$t"; die "重写 dns 段组名失败"; }
