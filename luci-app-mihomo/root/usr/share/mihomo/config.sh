@@ -1124,69 +1124,75 @@ apply_override() {  # $1=候选文件 (原地改) $2=profile 名
 		from="${r%% *}"
 		to="${r##* }"
 
-		# 幂等去重 + 缩进重排 (一次 awk 完成):
-		# - 覆写是对当前文件的增量, 不去重的话重复执行 override-apply / update
-		#   会把同一批条目追加两份 (模版转换天然幂等, 覆写不是) —— 目标块里
-		#   已有同内容条目 (忽略缩进差异) 时跳过, 全部已存在则本层无改动。
-		# - 目标块列表项缩进 (如 4 空格) 与覆写片段 (如 2 空格) 不一致时,
-		#   同级序列缩进不同会让 YAML 解析直接报错 (设备实测: "did not find
-		#   expected key") —— 以目标块内首个 "- " 行的缩进为准整体平移。
+		# 目标块首个 "- " 行的缩进: 覆写条目整体平移到这个缩进
 		tindent=$(sed -n "${from},${to}p" "$file" | awk '
 			/^[[:space:]]*-[[:space:]]/ {
 				s = $0; n = 0
 				while (substr(s, 1, 1) == " ") { n++; s = substr(s, 2) }
 				print n; exit
 			}')
-		findent=$(awk 'NR > 1 && $0 !~ /^[[:space:]]*$/ {
-				s = $0; n = 0
-				while (substr(s, 1, 1) == " ") { n++; s = substr(s, 2) }
-				if (min == "" || n < min) min = n
-			} END { print (min == "" ? 0 : min) }' "$tmp")
-		blk_norm=$(sed -n "${from},${to}p" "$file" | sed 's/^[[:space:]]*//')
-		awk -v blk="$blk_norm" -v t="$tindent" -v f="$findent" '
-			NR == 1 { print; next }
-			$0 ~ /^[[:space:]]*$/ { next }
-			$0 ~ /^[[:space:]]*#/ { next }
-			{
-				s = $0
-				sub(/^[[:space:]]+/, "", s)
-				if (index("\n" blk "\n", "\n" s "\n")) { skip = 1; next }
-				if (t != "" && f != t) {
-					n = 0
-					while (n < f && substr(s, 1, 1) == " ") { n++; s = substr(s, 2) }
-					pad = ""
-					for (i = 0; i < t; i++) pad = pad " "
-					s = pad s
+
+		# 覆写条目的"先删后插" (位置移动语义):
+		#   旧实现按内容判重 —— 条目只要已在目标块里就 skip。于是把
+		#   append-rules 改成 prepend-rules 时, 条目停在上次追加的位置
+		#   (MATCH 之后) 不动, 页面报"内容与当前一致"。但 prepend/append
+		#   的语义是"放到最前/最后", 位置本身就是覆写的一部分。
+		#   现在: 先从目标块删掉所有同首行的旧条目 (连同它的多行续行),
+		#   再把覆写条目插到指定位置。重复 apply 时删掉又插回同一位置,
+		#   字节不变 → 最终 cmp 仍报 unchanged, 幂等不变。
+		# 缩进: 基于覆写片段的原始行算相对缩进, 无条件平移到目标缩进。
+		#   旧实现先 sub() 掉全部前导空格、只在 f != t 时补缩进, 当
+		#   f == t (覆写与目标同为 2 空格) 时漏补, 插进去的条目变顶格,
+		#   YAML 里同级序列缩进不一致 → mihomo -t 失败。
+		awk -v from="$from" -v to="$to" -v act="$act" -v t="$tindent" '
+			function lead(s,   n) { n = 0; while (substr(s, 1, 1) == " ") { n++; s = substr(s, 2) } return n }
+			function bare(s) { sub(/^[[:space:]]+/, "", s); return s }
+			function emit(   k) { for (k = 1; k <= nl; k++) print T[k] }
+			# 第一个文件 = 覆写片段: 读入数组
+			NR == FNR {
+				if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) next
+				ind = lead($0); b = bare($0)
+				if (substr(b, 1, 2) == "- ") {
+					cnt++; cur = cnt; base[cur] = ind
+					nl++; L[nl] = b; REL[nl] = 0
+				} else if (cur > 0) {
+					nl++; L[nl] = b; REL[nl] = ind - base[cur]
 				}
-				print s
+				if (cnt > 0 && FIRST[cnt] == "") FIRST[cnt] = L[nl]
+				next
 			}
-			END { if (skip) exit 3 }
-		' "$tmp" > "$tmp.new"; rc2=$?
+			# 第二个文件 = 目标配置: 先删旧条目, 再插到指定位置
+			{
+				if (cnt == 0) exit 3
+				if (T[1] == "") for (k = 1; k <= nl; k++) {
+					pad = ""; for (j = 0; j < t + REL[k]; j++) pad = pad " "
+					T[k] = pad L[k]
+				}
+				if (skipping) {
+					if (lead($0) > skip_ind || $0 ~ /^[[:space:]]*$/) next
+					skipping = 0
+				}
+				if (FNR > to && act == "append" && !appended) { emit(); appended = 1 }
+				if (FNR == from && act == "prepend") { print; emit(); next }
+				if (FNR > from && FNR <= to) {
+					b = bare($0)
+					for (i = 1; i <= cnt; i++) if (b == FIRST[i]) {
+						skipping = 1; skip_ind = lead($0)
+						next
+					}
+				}
+				print
+			}
+			END { if (cnt > 0 && act == "append" && !appended) emit() }
+		' "$tmp" "$file" > "$out"
+		rc2=$?
 		case $rc2 in
 			0|3) ;;
-			*) die "覆写失败: 预处理 $key 段时出错" ;;
+			*) die "覆写失败: 处理 $key 段时出错" ;;
 		esac
-		TMPFILES="$TMPFILES $tmp.new"
-		if [ "$(wc -l < "$tmp.new" | tr -d ' ')" -le 1 ]; then
-			OV_NOTE="$OV_NOTE$key=条目已在目标中,跳过 "
+		if [ "$rc2" -eq 3 ]; then
+			OV_NOTE="$OV_NOTE$key=空片段,跳过 "
 			continue
-		fi
-		tmp="$tmp.new"
-
-		if [ "$act" = "prepend" ]; then
-			{
-				head -n "$from" "$file"
-				awk 'NR > 1' "$tmp"
-				tail -n +$((from + 1)) "$file"
-			} > "$out" || die "覆写失败: 处理 $key 段时出错"
-		else
-			# append: 追加到该键列表真正的最后 (与 Verge Merge 语义一致;
-			# 注意 rules 若以 MATCH 结尾, 追加在其后的条目不会生效)
-			{
-				head -n "$to" "$file"
-				awk 'NR > 1' "$tmp"
-				tail -n +$((to + 1)) "$file"
-			} > "$out" || die "覆写失败: 处理 $key 段时出错"
 		fi
 		mv -f "$out" "$file"
 		OV_NOTE="$OV_NOTE$key=$act "
